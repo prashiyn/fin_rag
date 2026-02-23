@@ -1,593 +1,645 @@
-import os
+"""
+FastAPI server for FinSage RAG Agent.
+Replaces the previous Flask app; preserves all routes, auth, SSE streaming, and DB behavior.
+"""
+import atexit
+import datetime
 import json
 import logging
-import yaml
-import uuid
-import datetime
+import os
+import shutil
+import signal
+import sys
 import threading
-from threading import Timer
-from flask import Flask, request, Response, current_app, render_template, stream_with_context, g
-from flask_cors import CORS
-from functools import wraps
-import sqlite3
-import requests
+import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Timer
 
+import requests
+import yaml
+from fastapi import FastAPI, Request, Depends
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from starlette.middleware.cors import CORSMiddleware
+from starlette.templating import Jinja2Templates
+
+from database import close_db, get_session, init_db
+from models import Feedback
 from utils.ragManager import RAGManager
 from utils.vllmChatService import ChatService
 
-db_lock = threading.Lock()
+# ---------------------------------------------------------------------------
+# Config and DB (used in lifespan and routes)
+# ---------------------------------------------------------------------------
 
-def get_db():
-    if 'db' not in g:
-        db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'log', 'feedback.db')
-        g.db = sqlite3.connect(db_path)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA busy_timeout=5000")  # Wait up to 5s when database is locked
-    return g.db
+PROJECT_ROOT = Path(__file__).resolve().parent
+LOG_PATH = PROJECT_ROOT / "server.log"
+BACKUP_DIR = Path("/root/autodl-tmp/server_logs")
 
-# Global response handler remains the same
-class GlobalResponseHandler:
-    @staticmethod
-    def success(data=None, message="Success", status_code=200):
-        return GlobalResponseHandler._create_response("success", message, data, status_code)
 
-    @staticmethod
-    def error(message="An error occurred", data=None, status_code=400):
-        return GlobalResponseHandler._create_response("error", message, data, status_code)
+def load_config(config_path: str) -> dict:
+    with open(config_path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
-    @staticmethod
-    def _create_response(status, message, data, status_code):
-        response = {
-            "status": status,
-            "message": message,
-            "data": data
-        }
-        response_json = json.dumps(response)
-        return Response(response=response_json, status=status_code, mimetype='application/json')
-        
-    @staticmethod
-    def stream_response(generate_func):
-        return Response(stream_with_context(generate_func()), content_type='text/event-stream')
 
-def load_config(config_path: str):
-    with open(config_path, 'r') as file:
-        return yaml.safe_load(file)
+def get_config_path() -> Path:
+    raw = os.getenv("CONFIG_PATH")
+    if raw:
+        return Path(raw)
+    return PROJECT_ROOT.parent / "config" / "production.yaml"
 
-# Updated decorator that uses current_app instead of the global app instance.
-def require_bearer_token(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        auth_header = request.headers.get('Authorization')
-        if not auth_header:
-            return GlobalResponseHandler.error(
-                message="Missing Authorization header",
-                status_code=401
-            )
-        if not auth_header.startswith('Bearer '):
-            return GlobalResponseHandler.error(
-                message="Invalid authorization format. Use 'Bearer <token>'",
-                status_code=401
-            )
-        token = auth_header.split(' ')[1]
-        if not token or token != current_app.config['BEARER_TOKEN']:
-            return GlobalResponseHandler.error(
-                message="Invalid bearer token",
-                status_code=401
-            )
-        return f(*args, **kwargs)
-    return decorated
 
-def create_app():
-    import os
-    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+# ---------------------------------------------------------------------------
+# Response envelope (same as Flask: status, message, data)
+# ---------------------------------------------------------------------------
 
-    # Create the Flask app instance and configure it
-    app = Flask(__name__)
-    app.secret_key = os.urandom(24)
-    CORS(app)
+def success_response(data=None, message: str = "Success", status_code: int = 200):
+    return JSONResponse(
+        status_code=status_code,
+        content={"status": "success", "message": message, "data": data},
+    )
 
-    # Load configuration (from an environment variable or a default file)
-    config_path = os.getenv('CONFIG_PATH', '../config/production.yaml')
-    config = load_config(config_path)
-    
-    # Set up required configuration values
-    app.config['BEARER_TOKEN'] = config.get('bearer_token') or os.getenv('BEARER_TOKEN')
-    if not app.config['BEARER_TOKEN']:
+
+def error_response(message: str = "An error occurred", data=None, status_code: int = 400):
+    return JSONResponse(
+        status_code=status_code,
+        content={"status": "error", "message": message, "data": data},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Auth dependency
+# ---------------------------------------------------------------------------
+
+security = HTTPBearer(auto_error=False)
+
+
+async def require_bearer_token(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+) -> str:
+    """Validate Bearer token; return JSONResponse with status/message envelope on failure (same as Flask)."""
+    token = getattr(request.app.state, "bearer_token", None)
+    if not token:
+        return error_response(message="Bearer token not configured", status_code=401)
+    if not credentials:
+        return error_response(message="Missing Authorization header", status_code=401)
+    if not credentials.credentials or credentials.credentials != token:
+        return error_response(message="Invalid bearer token", status_code=401)
+    return credentials.credentials
+
+
+async def check_token_optional(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+):
+    """For /api/check_token: validate Bearer; return JSONResponse with envelope on failure."""
+    token = getattr(request.app.state, "bearer_token", None)
+    if not token:
+        return error_response(message="Bearer token not configured", status_code=401)
+    if not credentials:
+        return error_response(message="Missing Authorization header", status_code=401)
+    if not credentials.credentials or credentials.credentials != token:
+        return error_response(message="Invalid bearer token", status_code=401)
+
+
+# ---------------------------------------------------------------------------
+# Helpers used by routes (low-rating webhook and SSE parsing)
+# ---------------------------------------------------------------------------
+
+def extract_reply_contents(sse_text: str) -> str:
+    """Extract payload.content from event:reply in SSE text. Returns last reply."""
+    contents = []
+    current_event = None
+    data_buffer = []
+    for line in sse_text.splitlines():
+        if line.startswith("event:"):
+            if current_event == "reply" and data_buffer:
+                data_json = json.loads("".join(data_buffer))
+                contents.append(data_json["payload"]["content"])
+            current_event = line[6:].strip()
+            data_buffer = []
+        elif line.startswith("data:"):
+            data_buffer.append(line[5:].strip())
+    if current_event == "reply" and data_buffer:
+        data_json = json.loads("".join(data_buffer))
+        contents.append(data_json["payload"]["content"])
+    return contents[-1] if contents else ""
+
+
+def handle_low_rating(
+    config: dict,
+    session_id: str,
+    feedback: str,
+    question: str,
+    response: str,
+) -> str | None:
+    appkey = config.get("r1_online_appkey")
+    url = config.get("r1_online_url")
+    if not appkey or not url:
+        return None
+    content = (
+        f'User Issues：{question}\nCurrent Answer： {response}\n'
+        "User is not satisfied with the current answer, please search the internet and judge"
+        if not feedback
+        else (
+            f'User Issues：{question}\nCurrent Answer： {response}\n'
+            f"User is not satisfied with the current answer, this is the user's feedback on the answer: {feedback}\n"
+            "Please search the internet and judge"
+        )
+    )
+    payload = {
+        "session_id": session_id,
+        "bot_app_key": appkey,
+        "visitor_biz_id": session_id,
+        "content": content,
+        "incremental": True,
+        "streaming_throttle": 10,
+        "visitor_labels": [],
+        "custom_variables": {},
+        "search_network": "enable",
+    }
+    resp = requests.post(
+        url,
+        headers={"Content-Type": "application/json"},
+        json=payload,
+        stream=False,
+        timeout=None,
+    )
+    resp.encoding = "utf-8"
+    return extract_reply_contents(resp.text)
+
+
+# ---------------------------------------------------------------------------
+# Lifespan: config, logging, RAG/ChatService, cleanup timer, DB, signal handlers
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
+
+    config_path = get_config_path()
+    config = load_config(str(config_path))
+
+    bearer_token = config.get("bearer_token") or os.getenv("BEARER_TOKEN")
+    if not bearer_token:
         raise ValueError("Bearer token not configured")
+    app.state.bearer_token = bearer_token
+    app.state.config = config
 
-    # Setup logging based on configuration
-    log_level = config.get('log_level', 'WARNING')
+    log_level = config.get("log_level", "WARNING")
     numeric_level = getattr(logging, log_level.upper(), None)
     if not isinstance(numeric_level, int):
         raise ValueError(f"Invalid log level: {log_level}")
 
     logging.basicConfig(
-        filename='server.log', 
-        filemode='w', 
-        level=numeric_level, 
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        filename=str(LOG_PATH),
+        filemode="w",
+        level=numeric_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
     logger = logging.getLogger(__name__)
-    app.logger = logger  # Attach the logger to the app
-
-    # 添加信号钩子 + atexit 备份 ----------
-    import atexit, shutil, signal, sys, datetime as dt
-    PROJECT_ROOT = Path(__file__).resolve().parent          # 当前文件所在目录
-    LOG_PATH = PROJECT_ROOT / 'server.log'
-    BACKUP_DIR = Path('/root/autodl-tmp/server_logs')
+    app.state.logger = logger
 
     def backup_log():
         for h in logger.handlers:
             h.flush()
-        ts = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         try:
-            shutil.copy2(LOG_PATH, BACKUP_DIR / f'server{ts}.log')
-            print(f"Log backed up to backup/server{ts}.log")
+            BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(LOG_PATH, BACKUP_DIR / f"server{ts}.log")
+            print(f"Log backed up to {BACKUP_DIR}/server{ts}.log")
         except Exception as e:
             print(f"Backup failed: {e}")
 
-    atexit.register(backup_log)  # Python 解释器正常退出时兜底
+    atexit.register(backup_log)
 
     def graceful_exit(signum, frame):
-        logger.warning(f"Received signal {signum}, backing up log before exit")
+        logger.warning("Received signal %s, backing up log before exit", signum)
         backup_log()
         logging.shutdown()
         sys.exit(0)
 
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT):
         signal.signal(sig, graceful_exit)
-    # ----------代码块结束 ----------
 
-
-
-    # Initialize your managers/services
-    collections = {'lotus': 10}
+    collections = {"lotus": 10}
     rag_manager = RAGManager(config=config, collections=collections)
-    chat_service = ChatService(config=config, rag_manager=rag_manager, rerank_topk=config['rerank_topk'])
-    
-    # Set up periodic cleanup of old sessions every 5 minutes
+    chat_service = ChatService(
+        config=config, rag_manager=rag_manager, rerank_topk=config["rerank_topk"]
+    )
+    app.state.rag_manager = rag_manager
+    app.state.chat_service = chat_service
+
     def schedule_cleanup():
         chat_service.cleanup_old_sessions()
-        cleanup_timer = Timer(300, schedule_cleanup)
-        cleanup_timer.daemon = True
-        cleanup_timer.start()
+        t = Timer(300, schedule_cleanup)
+        t.daemon = True
+        t.start()
+        app.state.cleanup_timer = t
         logger.info("Scheduled next session cleanup in 5 minutes")
-    
-    # Start the initial cleanup timer
+
     cleanup_timer = Timer(300, schedule_cleanup)
     cleanup_timer.daemon = True
     cleanup_timer.start()
+    app.state.cleanup_timer = cleanup_timer
     logger.info("Initial session cleanup scheduled in 5 minutes")
-    # logger.warning("Load ChatService: Max CUDA memory allocated: {} GB".format(torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024)))
-    
-    # Save instances in the app config for access in your routes
-    app.config['rag_manager'] = rag_manager
-    app.config['chat_service'] = chat_service
-    app.config['cleanup_timer'] = cleanup_timer  # Store the timer reference for potential cleanup
 
-    # Define your routes (using the updated decorator)
-    @app.route('/health', methods=['GET'])
-    def health_check():
-        return GlobalResponseHandler.success(message="Server is running")
+    database_url = config.get("database_url")
+    if not database_url:
+        raise ValueError("database_url not configured (required for feedback storage)")
+    init_db(database_url)
 
-    @app.route('/api/check_token', methods=['GET'])
-    def check_token():
-        auth_header = request.headers.get('Authorization')
-        if not auth_header:
-            return GlobalResponseHandler.error(
-                message="Missing Authorization header",
-                status_code=401
+    yield
+
+    # Shutdown: cancel initial and any rescheduled cleanup timer
+    cleanup_timer.cancel()
+    current = getattr(app.state, "cleanup_timer", None)
+    if current is not None and current is not cleanup_timer:
+        current.cancel()
+    close_db()
+
+
+# ---------------------------------------------------------------------------
+# App and middleware
+# ---------------------------------------------------------------------------
+
+app = FastAPI(
+    title="FinSage RAG Agent",
+    description="Multi-retrieval RAG API",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+templates = Jinja2Templates(directory=str(PROJECT_ROOT / "templates"))
+
+
+# ---------------------------------------------------------------------------
+# Exception handler (same envelope as Flask)
+# ---------------------------------------------------------------------------
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger = getattr(request.app.state, "logger", logging.getLogger(__name__))
+    logger.error("An unexpected error occurred: %s", exc)
+    return error_response(
+        message=f"Internal Server Error: {str(exc)}",
+        status_code=500,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@app.get("/health")
+async def health_check():
+    return success_response(message="Server is running")
+
+
+@app.get("/api/check_token", dependencies=[Depends(check_token_optional)])
+async def check_token():
+    return success_response(message="Token is valid")
+
+
+@app.post("/api_chat")
+async def api_chat(
+    request: Request,
+    _: str = Depends(require_bearer_token),
+):
+    try:
+        body = await request.json()
+        question = body.get("question")
+        session_id = body.get("session_id") or str(uuid.uuid4())
+        internal_input = body.get("internal_input")
+        interrupt_index = body.get("interrupt_index")
+
+        if not question:
+            return error_response(message="Question not provided")
+
+        chat_service = request.app.state.chat_service
+        response_text, _, _, _, _, _, history = chat_service.generate_response_async(
+            question, session_id, internal_input, interrupt_index
+        )
+        return success_response(
+            data={
+                "response": response_text,
+                "session_id": session_id,
+                "history": history,
+            }
+        )
+    except Exception as e:
+        request.app.state.logger.error("An error occurred in /api_chat endpoint: %s", e)
+        return error_response(message=str(e))
+
+
+def _stream_chat(app_ref, question, session_id, internal_input, interrupt_index):
+    """Generator for SSE: yields chunks, then saves Q&A to DB. Uses app_ref.state for DB and logger."""
+    full_response = ""
+    response_id = str(uuid.uuid4())
+    chat_service = app_ref.state.chat_service
+    stream_gen = chat_service.generate_response_async_stream(
+        question, session_id, internal_input, interrupt_index
+    )
+    for chunk in stream_gen:
+        if full_response == "":
+            try:
+                chunk_data = chunk.replace("data: ", "").strip()
+                chunk_json = json.loads(chunk_data)
+                if "response" in chunk_json:
+                    chunk_json["question"] = question
+                    chunk_json["response_id"] = response_id
+                    full_response += chunk_json["response"]
+                    chunk = f"data: {json.dumps(chunk_json)}\n\n"
+            except Exception as e:
+                app_ref.state.logger.error("Error modifying first chunk: %s", e)
+        else:
+            try:
+                chunk_data = chunk.replace("data: ", "").strip()
+                chunk_json = json.loads(chunk_data)
+                if "response" in chunk_json:
+                    full_response += chunk_json["response"]
+            except Exception as e:
+                app_ref.state.logger.error("Error parsing chunk: %s", e)
+        yield chunk
+
+    try:
+        chat_manager = chat_service.get_or_create_chat_manager(session_id)
+        log = chat_manager.get_runtime_log()
+        with get_session() as session:
+            session.add(
+                Feedback(
+                    session_id=session_id,
+                    response_id=response_id,
+                    rating=0,
+                    question=question,
+                    response=full_response,
+                    is_rag=1,
+                    log=json.dumps(log),
+                )
             )
-        if not auth_header.startswith('Bearer '):
-            return GlobalResponseHandler.error(
-                message="Invalid authorization format. Use 'Bearer <token>'",
-                status_code=401
-            )
-        token = auth_header.split(' ')[1]
-        if not token or token != current_app.config['BEARER_TOKEN']:
-            return GlobalResponseHandler.error(
-                message="Invalid bearer token",
-                status_code=401
-            )
-        return GlobalResponseHandler.success(message="Token is valid")
+        app_ref.state.logger.info("Saved Q&A pair to database with response_id: %s", response_id)
+    except Exception as e:
+        app_ref.state.logger.error("Error saving Q&A to database: %s", e)
 
 
-    @app.route('/api_chat', methods=['POST'])
-    @require_bearer_token
-    def api_chat():
-        try:
-            data = request.json
-            question = data.get('question')
-            session_id = data.get('session_id', str(uuid.uuid4()))
-            internal_input = data.get('internal_input', None)
-            interrupt_index = data.get('interrupt_index', None)
+@app.post("/api_chat_stream")
+async def api_chat_stream(
+    request: Request,
+    _: str = Depends(require_bearer_token),
+):
+    try:
+        body = await request.json()
+        question = body.get("question")
+        session_id = body.get("session_id") or str(uuid.uuid4())
+        internal_input = body.get("internal_input")
+        interrupt_index = body.get("interrupt_index")
 
-            if not question:
-                return GlobalResponseHandler.error(message="Question not provided")
+        if not question:
+            return error_response(message="Question not provided")
 
-            # Retrieve the chat service instance from the app config
-            chat_service_instance = current_app.config['chat_service']
-            response_text, _, _, _, _, _, history = chat_service_instance.generate_response_async(
+        return StreamingResponse(
+            _stream_chat(
+                request.app,
                 question,
                 session_id,
                 internal_input,
                 interrupt_index,
-            )
-
-            return GlobalResponseHandler.success(data={
-                "response": response_text,
-                "session_id": session_id,
-                "history": history
-            })
-        
-        except Exception as e:
-            current_app.logger.error(f"An error occurred in /api_chat endpoint: {str(e)}")
-            return GlobalResponseHandler.error(message=str(e))
-
-
-    @app.route('/api_chat_stream', methods=['POST'])
-    @require_bearer_token
-    def api_chat_stream():
-        try:
-            data = request.json
-            question = data.get('question')
-            session_id = data.get('session_id', str(uuid.uuid4()))
-            internal_input = data.get('internal_input', None)
-            interrupt_index = data.get('interrupt_index', None)
-
-            if not question:
-                return GlobalResponseHandler.error(message="Question not provided")
-
-            # Retrieve the chat service instance from the app config
-            chat_service_instance = current_app.config['chat_service']
-            
-            # Create a wrapper generator to intercept and save the response
-            def response_interceptor():
-                full_response = ""
-                # Generate a unique response_id at the beginning
-                response_id = str(uuid.uuid4())
-                
-                # Get the streaming response generator
-                stream_generator = chat_service_instance.generate_response_async_stream(
-                    question,
-                    session_id,
-                    internal_input,
-                    interrupt_index,
-                )
-                
-                # Process each chunk
-                for chunk in stream_generator:
-                    # First chunk handling - modify to include response_id before yielding
-                    if full_response == "":
-                        try:
-                            # Parse the chunk data
-                            chunk_data = chunk.replace("data: ", "").strip()
-                            chunk_json = json.loads(chunk_data)
-                            if "response" in chunk_json:
-                                # Add response_id to the first chunk
-                                chunk_json["question"] = question
-                                chunk_json["response_id"] = response_id
-                                # Update the chunk with the response_id
-                                chunk = f"data: {json.dumps(chunk_json)}\n\n"
-                                # Add to full response
-                                full_response += chunk_json["response"]
-                        except Exception as e:
-                            current_app.logger.error(f"Error modifying first chunk: {str(e)}")
-                    else:
-                        # For subsequent chunks, just extract content
-                        try:
-                            # Parse the chunk data (format: "data: {"response": "chunk_text"}\n\n")
-                            chunk_data = chunk.replace("data: ", "").strip()
-                            chunk_json = json.loads(chunk_data)
-                            if "response" in chunk_json:
-                                full_response += chunk_json["response"]
-                        except Exception as e:
-                            current_app.logger.error(f"Error parsing chunk: {str(e)}")
-                    
-                    # Pass the chunk to the client after any modifications
-                    yield chunk
-                
-                # Save the complete Q&A pair to the database
-                try:
-                    chat_manager = chat_service_instance.get_or_create_chat_manager(session_id)
-                    log = chat_manager.get_runtime_log()
-                        
-                    with db_lock:
-                        db = get_db()
-                        cursor = db.cursor()
-                        cursor.execute(
-                            "INSERT INTO feedback (session_id, response_id, rating, question, response, is_rag, log) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                            (session_id, response_id, 0, question, full_response, 1, json.dumps(log))
-                        )
-                        db.commit()
-                    current_app.logger.info(f"Saved Q&A pair to database with response_id: {response_id}")
-                except Exception as e:
-                    current_app.logger.error(f"Error saving Q&A to database: {str(e)}")
-            
-            # Use the interceptor in the response
-            return Response(
-                stream_with_context(response_interceptor()),
-                content_type='text/event-stream'
-            )
-        
-        except Exception as e:
-            current_app.logger.error(f"An error occurred in /api_chat_stream endpoint: {str(e)}")
-            return GlobalResponseHandler.error(message=str(e))
-
-    @app.route('/test_api_chat')
-    def test_api_chat():
-        session_id = str(uuid.uuid4())
-        # Initialize a chat manager for this session
-        chat_service_instance = current_app.config['chat_service']
-        _ = chat_service_instance.get_or_create_chat_manager(session_id)
-        return render_template('test_api.html', session_id=session_id)
-
-    @app.route('/feedback')
-    def feedback():
-        try:
-            with db_lock:
-                db = get_db()
-                cursor = db.execute('SELECT session_id, response_id, rating, feedback, question, response, log, user, created_at FROM feedback ORDER BY id DESC')
-                feedbacks = cursor.fetchall()
-                
-            # Convert to list of dictionaries for easier handling in template
-            feedback_list = []
-            for row in feedbacks:
-                feedback_list.append({
-                    'session_id': row[0],
-                    'time': row[8],
-                    'rating': row[2],
-                    'feedback': row[3] or '',
-                    'question': row[4],
-                    'response': row[5],
-                    'log': row[6],
-                    'user': row[7] or ''
-                })
-                
-            return render_template('feedback.html', feedbacks=feedback_list)
-        except Exception as e:
-            current_app.logger.error(f"An error occurred in /feedback endpoint: {str(e)}")
-            return f"Error: {str(e)}", 500
-
-    @app.route('/api/internal_assistant', methods=['POST'])
-    @require_bearer_token
-    def internal_assistant():
-        try:
-            data = request.json
-            session_id = data.get('session_id')
-            internal_message = data.get('message')
-            
-            if not session_id:
-                return GlobalResponseHandler.error(message="Session ID not provided")
-            
-            if not internal_message:
-                return GlobalResponseHandler.error(message="Internal assistant message not provided")
-                
-            # Get the chat service instance from the app config
-            chat_service_instance = current_app.config['chat_service']
-            
-            # Get or create chat manager for this session
-            chat_manager = chat_service_instance.get_or_create_chat_manager(session_id)
-            
-            # Add the internal assistant message to the QA history
-            chat_manager.add_internal_assitant_message(internal_message)
-            
-            return GlobalResponseHandler.success(data={
-                "session_id": session_id,
-                "status": "Internal assistant message added successfully"
-            })
-            
-        except Exception as e:
-            current_app.logger.error(f"An error occurred in /api/internal_assistant endpoint: {str(e)}")
-            return GlobalResponseHandler.error(message=str(e))
-
-    @app.route('/api/log', methods=['GET'])
-    @require_bearer_token
-    def get_log():
-        try:
-            session_id = request.args.get('session_id')
-            if not session_id:
-                return GlobalResponseHandler.error(message="Session ID not provided")
-            chat_service_instance = current_app.config['chat_service']
-            chat_manager = chat_service_instance.get_or_create_chat_manager(session_id)
-            logs = chat_manager.get_runtime_log()
-            current_app.logger.info(logs)
-            return GlobalResponseHandler.success(data=logs)
-        except Exception as e:
-            current_app.logger.error(f"An error occurred in /api/log endpoint: {str(e)}")
-            return GlobalResponseHandler.error(message=str(e))
-
-    @app.route('/api/report_error', methods=['POST'])
-    @require_bearer_token
-    def report_error():
-        try:
-            data = request.json
-            session_id = data.get('session_id')
-            error_message = data.get('error_message')
-            
-            if not session_id:
-                return GlobalResponseHandler.error(message="Session ID not provided")
-            
-            if not error_message:
-                return GlobalResponseHandler.error(message="Error message not provided")
-            
-            # Get session log
-            chat_service_instance = current_app.config['chat_service']
-            chat_manager = chat_service_instance.get_or_create_chat_manager(session_id)
-            logs = chat_manager.get_runtime_log()
-            
-            # Create error log directory if it doesn't exist
-            error_log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'log', 'error')
-            os.makedirs(error_log_dir, exist_ok=True)
-            
-            # Create error report with timestamp
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            error_report = {
-                "timestamp": timestamp,
-                "session_id": session_id,
-                "error_message": error_message,
-                "session_log": logs
-            }
-            
-            # Save error report to file
-            error_file_path = os.path.join(error_log_dir, f"{timestamp}.json")
-            with open(error_file_path, 'w') as f:
-                json.dump(error_report, f, indent=2, ensure_ascii=False)
-            
-            current_app.logger.warning(f"Error report saved to {error_file_path}")
-            return GlobalResponseHandler.success(message="Error report submitted successfully")
-        except Exception as e:
-            current_app.logger.error(f"An error occurred in /api/report_error endpoint: {str(e)}")
-            return GlobalResponseHandler.error(message=str(e))
-
-    @app.route('/api/submit_rating', methods=['POST'])
-    @require_bearer_token
-    def submit_rating():
-        try:
-            data = request.json
-            session_id = data.get('session_id')
-            response_id = data.get('response_id')
-            # rating = data.get('rating')
-            feedback = data.get('feedback')
-            question = data.get('question')
-            response = data.get('response_content')
-            user = data.get('user', '')
-
-            rating_raw = data.get('rating')
-            try:
-                rating = int(rating_raw)
-            except (TypeError, ValueError):
-                return GlobalResponseHandler.error(message="Invalid rating value")
-            
-            if not session_id or not response_id or not question or not response:
-                return GlobalResponseHandler.error(message="Missing required fields")
-            
-            # Save the rating and feedback and chat manager runtime log into sqlite database
-            chat_service_instance = current_app.config['chat_service']
-            chat_manager = chat_service_instance.get_or_create_chat_manager(session_id)
-            log = chat_manager.get_runtime_log()
-
-            with db_lock:
-                db = get_db()
-                # Try to update existing record first, if not found then insert a new one
-                cursor = db.execute(
-                    'UPDATE feedback SET rating = ?, feedback = ?, question = ?, response = ?, log = ?, user = ? WHERE session_id = ? AND response_id = ?',
-                    (rating, feedback, question, response, json.dumps(log), user, session_id, response_id)
-                )
-                # If no rows were affected by the update, insert a new record
-                if cursor.rowcount == 0:
-                    db.execute(
-                        'INSERT INTO feedback (session_id, response_id, rating, feedback, question, response, log, user) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                        (session_id, response_id, rating, feedback, question, response, json.dumps(log), user)
-                    )
-                db.commit()
-
-            if rating <= 2:
-                online_answer = handle_low_rating(session_id=session_id,feedback=feedback,question=question,response=response)  
-            else:
-                online_answer = None     
-
-            return GlobalResponseHandler.success(
-                data={
-                    "online_answer": online_answer  # ② 放进 data
-                },
-                message="Rating submitted successfully"
-            )
-        except Exception as e:
-            current_app.logger.error(f"An error occurred in /api/submit_rating endpoint: {str(e)}")
-            return GlobalResponseHandler.error(message=str(e))
-
-    def handle_low_rating(session_id ,feedback: str,question: str, response:str):
-        appkey = config.get('r1_online_appkey')
-        url = config.get('r1_online_url')
-
-        if not feedback: # 无
-            content = f""""
-            用户问题：{question}
-            目前答案： {response}
-            用户对于目前的答案不满意 请联网搜索并进行评判
-            """  
-        else:
-            content = f""""
-            用户问题：{question}
-            目前答案： {response}
-            用户对于目前的答案不满意 这是用户对于答案的反馈： {feedback}
-            请联网搜索并进行评判
-            """    
-
-        payload = {
-            "session_id":      session_id,
-            "bot_app_key":     appkey,
-            "visitor_biz_id":  session_id,
-            "content":         content,
-            "incremental":     True,
-            "streaming_throttle": 10,
-            "visitor_labels":  [],
-            "custom_variables": {},
-            "search_network":"enable"
-        }
-
-        resp = requests.post(
-            url,
-            headers={"Content-Type": "application/json"},
-            json=payload,
-            stream=False, timeout=None
+            ),
+            media_type="text/event-stream",
         )
-        resp.encoding = "utf-8"          # 告诉 requests 按 UTF‑8 解码
-        sse_text = resp.text             # 现在就是正常中文
-        # print(sse_text)
-        return extract_reply_contents(sse_text)
-  
-    def extract_reply_contents(sse_text: str) -> str:
-        """
-        从完整的 SSE 文本中提取所有 event:reply 的 payload.content。
-        返回一个列表，按出现顺序排列。
-        """
-        contents = []
-        current_event = None
-        data_buffer = []
-
-        for line in sse_text.splitlines():
-            if line.startswith("event:"):
-                # 遇到新事件——先把上一段 data 处理掉
-                if current_event == "reply" and data_buffer:
-                    data_json = json.loads("".join(data_buffer))
-                    contents.append(data_json["payload"]["content"])
-                # 重置并记录新事件名
-                current_event = line[6:].strip()
-                data_buffer = []
-            elif line.startswith("data:"):
-                # 去掉开头 "data:" 累积 JSON 字符串
-                data_buffer.append(line[5:].strip())
-
-        # 处理文本末尾最后一段（若也是 reply）
-        if current_event == "reply" and data_buffer:
-            data_json = json.loads("".join(data_buffer))
-            contents.append(data_json["payload"]["content"])
-
-        return contents[-1]        
+    except Exception as e:
+        request.app.state.logger.error(
+            "An error occurred in /api_chat_stream endpoint: %s", e
+        )
+        return error_response(message=str(e))
 
 
+@app.get("/test_api_chat")
+async def test_api_chat(request: Request):
+    session_id = str(uuid.uuid4())
+    chat_service = request.app.state.chat_service
+    _ = chat_service.get_or_create_chat_manager(session_id)
+    return templates.TemplateResponse(
+        "test_api.html",
+        {"request": request, "session_id": session_id},
+    )
 
 
-    @app.errorhandler(Exception)
-    def handle_exception(e):
-        current_app.logger.error(f"An unexpected error occurred: {str(e)}")
-        return GlobalResponseHandler.error(message=f"Internal Server Error: {str(e)}")
+@app.get("/feedback")
+async def feedback(request: Request):
+    try:
+        with get_session() as session:
+            rows = (
+                session.query(Feedback)
+                .order_by(Feedback.id.desc())
+                .all()
+            )
+        feedback_list = [
+            {
+                "session_id": r.session_id,
+                "time": r.created_at,
+                "rating": r.rating,
+                "feedback": (r.feedback or ""),
+                "question": r.question,
+                "response": r.response,
+                "log": r.log,
+                "user": (r.user or ""),
+            }
+            for r in rows
+        ]
+        return templates.TemplateResponse(
+            "feedback.html",
+            {"request": request, "feedbacks": feedback_list},
+        )
+    except Exception as e:
+        request.app.state.logger.error("An error occurred in /feedback endpoint: %s", e)
+        return error_response(message=str(e), status_code=500)
 
-    @app.teardown_appcontext
-    def close_db(e=None):
-        db = g.pop('db', None)
-        if db is not None:
-            db.close()
 
-    return app
+@app.post("/api/internal_assistant")
+async def internal_assistant(
+    request: Request,
+    _: str = Depends(require_bearer_token),
+):
+    try:
+        body = await request.json()
+        session_id = body.get("session_id")
+        internal_message = body.get("message")
 
-# Create the app instance for production (this is what Gunicorn will import)
-app = create_app()
+        if not session_id:
+            return error_response(message="Session ID not provided")
+        if not internal_message:
+            return error_response(message="Internal assistant message not provided")
+
+        chat_service = request.app.state.chat_service
+        chat_manager = chat_service.get_or_create_chat_manager(session_id)
+        chat_manager.add_internal_assitant_message(internal_message)
+        return success_response(
+            data={
+                "session_id": session_id,
+                "status": "Internal assistant message added successfully",
+            }
+        )
+    except Exception as e:
+        request.app.state.logger.error(
+            "An error occurred in /api/internal_assistant endpoint: %s", e
+        )
+        return error_response(message=str(e))
+
+
+@app.get("/api/log")
+async def get_log(
+    request: Request,
+    _: str = Depends(require_bearer_token),
+):
+    try:
+        session_id = request.query_params.get("session_id")
+        if not session_id:
+            return error_response(message="Session ID not provided")
+        chat_service = request.app.state.chat_service
+        chat_manager = chat_service.get_or_create_chat_manager(session_id)
+        logs = chat_manager.get_runtime_log()
+        request.app.state.logger.info("%s", logs)
+        return success_response(data=logs)
+    except Exception as e:
+        request.app.state.logger.error("An error occurred in /api/log endpoint: %s", e)
+        return error_response(message=str(e))
+
+
+@app.post("/api/report_error")
+async def report_error(
+    request: Request,
+    _: str = Depends(require_bearer_token),
+):
+    try:
+        body = await request.json()
+        session_id = body.get("session_id")
+        error_message = body.get("error_message")
+
+        if not session_id:
+            return error_response(message="Session ID not provided")
+        if not error_message:
+            return error_response(message="Error message not provided")
+
+        chat_service = request.app.state.chat_service
+        chat_manager = chat_service.get_or_create_chat_manager(session_id)
+        logs = chat_manager.get_runtime_log()
+
+        error_log_dir = PROJECT_ROOT.parent / "log" / "error"
+        error_log_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        error_report = {
+            "timestamp": ts,
+            "session_id": session_id,
+            "error_message": error_message,
+            "session_log": logs,
+        }
+        error_file_path = error_log_dir / f"{ts}.json"
+        with open(error_file_path, "w", encoding="utf-8") as f:
+            json.dump(error_report, f, indent=2, ensure_ascii=False)
+        request.app.state.logger.warning("Error report saved to %s", error_file_path)
+        return success_response(message="Error report submitted successfully")
+    except Exception as e:
+        request.app.state.logger.error(
+            "An error occurred in /api/report_error endpoint: %s", e
+        )
+        return error_response(message=str(e))
+
+
+@app.post("/api/submit_rating")
+async def submit_rating(
+    request: Request,
+    _: str = Depends(require_bearer_token),
+):
+    try:
+        body = await request.json()
+        session_id = body.get("session_id")
+        response_id = body.get("response_id")
+        feedback = body.get("feedback")
+        question = body.get("question")
+        response_content = body.get("response_content")
+        user = body.get("user", "")
+
+        rating_raw = body.get("rating")
+        try:
+            rating = int(rating_raw)
+        except (TypeError, ValueError):
+            return error_response(message="Invalid rating value")
+
+        if not session_id or not response_id or not question or not response_content:
+            return error_response(message="Missing required fields")
+
+        chat_service = request.app.state.chat_service
+        chat_manager = chat_service.get_or_create_chat_manager(session_id)
+        log = chat_manager.get_runtime_log()
+        config = request.app.state.config
+
+        with get_session() as session:
+            row = (
+                session.query(Feedback)
+                .filter(
+                    Feedback.session_id == session_id,
+                    Feedback.response_id == response_id,
+                )
+                .first()
+            )
+            if row:
+                row.rating = rating
+                row.feedback = feedback
+                row.question = question
+                row.response = response_content
+                row.log = json.dumps(log)
+                row.user = user
+            else:
+                session.add(
+                    Feedback(
+                        session_id=session_id,
+                        response_id=response_id,
+                        rating=rating,
+                        feedback=feedback,
+                        question=question,
+                        response=response_content,
+                        log=json.dumps(log),
+                        user=user,
+                    )
+                )
+
+        online_answer = None
+        if rating <= 2:
+            online_answer = handle_low_rating(
+                config, session_id, feedback or "", question, response_content
+            )
+
+        return success_response(
+            data={"online_answer": online_answer},
+            message="Rating submitted successfully",
+        )
+    except Exception as e:
+        request.app.state.logger.error(
+            "An error occurred in /api/submit_rating endpoint: %s", e
+        )
+        return error_response(message=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint (uvicorn)
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # For local development only. Gunicorn will use the module-level "app".
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 6005)))
+    import uvicorn
+    port = int(os.getenv("PORT", "6005"))
+    uvicorn.run(
+        "server:app",
+        host="0.0.0.0",
+        port=port,
+        reload=False,
+    )

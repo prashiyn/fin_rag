@@ -185,25 +185,41 @@ def main():
         config = yaml.safe_load(file)
 
     # Initialize retriever
-    persist_directory = os.path.join(config['persist_directory'], "chroma")
     collection_name = "lotus"
-    embeddings = HuggingFaceEmbeddings(model_name=config['embeddings_model_name'])
+    embeddings = HuggingFaceEmbeddings(model_name=config["embeddings_model_name"])
+    host = config.get("chroma_server_host")
+    port = int(config.get("chroma_server_port", 8000))
 
-    chroma = Chroma(
-        collection_name=collection_name,
-        embedding_function=embeddings,
-        persist_directory=persist_directory,
-        relevance_score_fn="l2"
-    )
+    if host:
+        chroma = Chroma(
+            collection_name=collection_name,
+            embedding_function=embeddings,
+            host=host,
+            port=port,
+            relevance_score_fn="l2",
+        )
+        ts_chroma = Chroma(
+            collection_name=f"{collection_name}_ts",
+            embedding_function=embeddings,
+            host=host,
+            port=port,
+            relevance_score_fn="l2",
+        )
+    else:
+        chroma = Chroma(
+            collection_name=collection_name,
+            embedding_function=embeddings,
+            persist_directory=os.path.join(config["persist_directory"], "chroma"),
+            relevance_score_fn="l2",
+        )
+        ts_chroma = Chroma(
+            collection_name=collection_name,
+            embedding_function=embeddings,
+            persist_directory=os.path.join(config["persist_directory"], "ts_chroma"),
+            relevance_score_fn="l2",
+        )
 
-    ts_chroma = Chroma(
-        collection_name=collection_name,
-        embedding_function=embeddings,
-        persist_directory=os.path.join(config['persist_directory'], "ts_chroma"),
-        relevance_score_fn="l2"
-    )
-
-    bm25_dir = os.path.join(config['persist_directory'], "bm25_index", collection_name)
+    bm25_dir = os.path.join(config["persist_directory"], "bm25_index", collection_name)
     retriever = EnsembleRetriever(
         bm25_dir, 
         chroma,

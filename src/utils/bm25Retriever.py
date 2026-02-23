@@ -8,7 +8,6 @@ from langchain_chroma import Chroma
 from typing import List, Dict, Any, Optional
 import numpy as np
 import bm25s
-from langchain_core.pydantic_v1 import PrivateAttr
 import Stemmer
 
 def load_from_chroma_and_save(documents: List[Document], save_dir: str):

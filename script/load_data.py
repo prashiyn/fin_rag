@@ -133,9 +133,9 @@ if __name__ == '__main__':
     config_path = "../config/production.yaml"
     config = load_config(config_path)
 
-    # clear the persist_directory
-    if os.path.exists(config['persist_directory']):
-        shutil.rmtree(config['persist_directory'])
+    # With Chroma client-server, data lives on the server; only clear local file storage when using local Chroma
+    if not config.get("chroma_server_host") and os.path.exists(config["persist_directory"]):
+        shutil.rmtree(config["persist_directory"])
 
     rag = RAGManager(config)
     

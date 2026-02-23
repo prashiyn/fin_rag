@@ -7,11 +7,11 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from .profiler import profiler
+from src.utils.profiler import profiler
 import time
 
-from .bm25Retriever import BM25Retriever
-from .faissRetriever import FaissRetriever
+from src.utils.bm25Retriever import BM25Retriever
+from src.utils.faissRetriever import FaissRetriever
 
 class EnsembleRetriever:
     """Base class for retriever wrappers that handle document content retrieval"""
@@ -292,20 +292,38 @@ if __name__ == "__main__":
     embeddings = HuggingFaceEmbeddings(model_name=embeddings_model_name)
 
     from langchain_chroma import Chroma
-    chroma = Chroma(
-        collection_name=collection_name,
-        embedding_function =embeddings,
-        persist_directory=os.path.join(config['persist_directory'], "chroma"),
-        relevance_score_fn="l2" # l2, ip, cosine
-    )
-    ts_chroma = Chroma(
-        collection_name=collection_name,
-        embedding_function =embeddings,
-        persist_directory=os.path.join(config['persist_directory'], "ts_chroma"),
-        relevance_score_fn="l2" # l2, ip, cosine
-    )
-    
-    bm25_dir = os.path.join(config['persist_directory'], "bm25_index", collection_name)
+    host = config.get("chroma_server_host")
+    port = int(config.get("chroma_server_port", 8000))
+    if host:
+        chroma = Chroma(
+            collection_name=collection_name,
+            embedding_function=embeddings,
+            host=host,
+            port=port,
+            relevance_score_fn="l2",
+        )
+        ts_chroma = Chroma(
+            collection_name=f"{collection_name}_ts",
+            embedding_function=embeddings,
+            host=host,
+            port=port,
+            relevance_score_fn="l2",
+        )
+    else:
+        chroma = Chroma(
+            collection_name=collection_name,
+            embedding_function=embeddings,
+            persist_directory=os.path.join(config["persist_directory"], "chroma"),
+            relevance_score_fn="l2",
+        )
+        ts_chroma = Chroma(
+            collection_name=collection_name,
+            embedding_function=embeddings,
+            persist_directory=os.path.join(config["persist_directory"], "ts_chroma"),
+            relevance_score_fn="l2",
+        )
+
+    bm25_dir = os.path.join(config["persist_directory"], "bm25_index", collection_name)
     retriever = EnsembleRetriever(bm25_dir, chroma, ts_chroma, 10, embeddings,
                                   faiss_k=0, bm25_k=0, faiss_ts_k=10)
 

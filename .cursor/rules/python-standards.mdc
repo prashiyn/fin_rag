@@ -1,0 +1,28 @@
+---
+description: Python 3.10+ standards and style for the codebase
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# Python Standards
+
+- **Version**: Target Python 3.10+; use modern typing (`list[str]`, `dict[str, Any]`, optional `TypeAlias`).
+- **Imports**: Stdlib first, then third-party, then local. Use absolute imports for project packages (e.g. `from utils.ragManager import RAGManager` when running from `src/`).
+- **Logging**: Use `logger = logging.getLogger(__name__)` per module; no `print()` for production behavior. Log levels: DEBUG for diagnostics, INFO for normal flow, WARNING/ERROR for failures.
+- **Errors**: Prefer specific exceptions; avoid bare `except:`. Log before re-raise: `logger.exception("...")` or `logger.error("..."); raise`.
+- **Types**: Annotate public function signatures and return types. Use `Optional[X]` or `X | None` for nullable values.
+- **Style**: Follow PEP 8 (line length 88–100 acceptable). Use `pathlib.Path` for paths where convenient; `os.path` is acceptable for compatibility.
+
+```python
+# Prefer
+def load_config(config_path: str) -> dict[str, Any]:
+    with open(config_path) as f:
+        return yaml.safe_load(f)
+
+# Avoid bare except
+try:
+    ...
+except Exception as e:
+    logger.error("Operation failed: %s", e)
+    raise
+```

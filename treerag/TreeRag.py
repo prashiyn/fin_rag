@@ -1,14 +1,17 @@
 import psutil
 import logging
 import yaml
+import chromadb
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.chat_models import ChatOllama
 import uuid
 import time
-import concurrent.futures #added
+import concurrent.futures  # added
+
+
 def load_config(config_path):
-    with open(config_path, 'r') as file:
+    with open(config_path, "r") as file:
         return yaml.safe_load(file)
 
 
@@ -22,15 +25,17 @@ class RAGToTNode:
         self.children = []
         self.combined_summary = None
 class RAGToT:
-    def __init__(self, config, collection_name, batch_size=5,max_workers=5):
-        self.file_path = config['file_path']
-        self.persist_directory = config['persist_directory']
-        self.embeddings_model_name = config['embeddings_model_name']
+    def __init__(self, config, collection_name, batch_size=5, max_workers=5):
+        self.file_path = config.get("file_path")
+        self.persist_directory = config.get("persist_directory")
+        self.embeddings_model_name = config["embeddings_model_name"]
         self.collection_name = collection_name
         self.batch_size = batch_size
         self.store = {}
+        self.chroma_server_host = config.get("chroma_server_host")
+        self.chroma_server_port = int(config.get("chroma_server_port", 8000))
         mem = psutil.virtual_memory()
-        available_memory_gb = mem.available / (1024 ** 3)
+        available_memory_gb = mem.available / (1024**3)
         logging.info(f"Initializing ChromaManager - Available memory: {available_memory_gb:.2f} GB")
         self.current_tree = None
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
@@ -56,11 +61,22 @@ class RAGToT:
             memory_used_gb = available_memory_before_gb - available_memory_after_gb
             logging.info(f"Memory used by model: {memory_used_gb:.2f} GB")
 
-            self.chroma_db = Chroma(
-                embedding_function=self.embeddings,
-                persist_directory=self.persist_directory,
-                collection_name=self.collection_name
-            )
+            if self.chroma_server_host:
+                chroma_client = chromadb.HttpClient(
+                    host=self.chroma_server_host,
+                    port=self.chroma_server_port,
+                )
+                self.chroma_db = Chroma(
+                    embedding_function=self.embeddings,
+                    collection_name=self.collection_name,
+                    client=chroma_client,
+                )
+            else:
+                self.chroma_db = Chroma(
+                    embedding_function=self.embeddings,
+                    persist_directory=self.persist_directory,
+                    collection_name=self.collection_name,
+                )
             logging.info("Model loaded successfully.")
         except Exception as e:
             logging.error(f"Failed to load model: {e}")

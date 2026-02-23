@@ -14,11 +14,11 @@ from typing import Dict
 import pandas as pd
 from FlagEmbedding import FlagLLMReranker
 
-from .vllmManager import ChatManager
-from .ragManager import RAGManager
-from .profiler import profiler
-from .frequentQA import QuestionSimilarityFinder
-from .QARetriever import QAChromaLoader
+from src.utils.vllmManager import ChatManager
+from src.utils.ragManager import RAGManager
+from src.utils.profiler import profiler
+from src.utils.frequentQA import QuestionSimilarityFinder
+from src.utils.QARetriever import QAChromaLoader
 
 
 def select_most_recent_time(time_info):
@@ -88,10 +88,16 @@ class ChatService:
         self.reranker_lock = threading.Lock()
         
         self.reranker = FlagLLMReranker(config.get('rerank_model'), devices='cuda', use_fp16=True)
-        self.frequent_qa_db = config.get('frequent_qa_directory')
-        self.qa_table_directory = config.get('qa_table_directory')
-        self.question_similarity_finder = QuestionSimilarityFinder(self.frequent_qa_db,self.qa_table_directory)
-        self.qa_loader = QAChromaLoader(persist_directory = config.get("qa_table_persist_directory"), collection_name = "lotus_qa", embeddings_model_name="BAAI/bge-m3")
+        self.frequent_qa_db = config.get("frequent_qa_directory")
+        self.qa_table_directory = config.get("qa_table_directory")
+        self.question_similarity_finder = QuestionSimilarityFinder(database_url=config.get("database_url"))
+        self.qa_loader = QAChromaLoader(
+            persist_directory=config.get("qa_table_persist_directory"),
+            collection_name="lotus_qa",
+            embeddings_model_name=config.get("embeddings_model_name", "BAAI/bge-m3"),
+            chroma_server_host=config.get("chroma_server_host"),
+            chroma_server_port=config.get("chroma_server_port"),
+        )
         
 
         logger.warning("Load Reranker: Max CUDA memory allocated: {} GB".format(torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024)))

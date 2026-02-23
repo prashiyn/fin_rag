@@ -1,0 +1,12 @@
+---
+description: FinRAG project context, uv package manager, and FastAPI migration
+alwaysApply: true
+---
+
+# Project Context
+
+- **Project**: FinSage / RAG Agent Production — multi-retrieval RAG (BM25/FAISS/Chroma title summary), pluggable rerankers (FlagEmbedding/HF), OpenAI-compatible LLM, REST API, SQLite feedback.
+- **Stack**: Python 3.10+, migrating from **Flask** to **FastAPI**. Use **uv** as the sole package manager (no pip/poetry for dependency management).
+- **Config**: YAML via `CONFIG_PATH` (default `../config/production.yaml` from `src/`). Key fields: `persist_directory`, `embeddings_model_name`, `llm_base_url`, `llm_model_name`, `rerank_model`, `rerank_topk`, `log_level`, `bearer_token`.
+- **Paths**: App entry in `src/` (current `server.py` → FastAPI app). Persist dirs: `chroma/`, `ts_chroma/`, `bm25_index/<collection_name>/`. Logs: `src/server.log`, `log/error`, `log/feedback.db`.
+- **Tooling**: Use `uv add`, `uv sync`, `uv run`; define dependencies in `pyproject.toml`. Run API with `uv run uvicorn` (or equivalent) after migration.

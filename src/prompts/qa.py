@@ -25,8 +25,8 @@ def get_if_query_rag_prompt(question, qa_history):
      The latest available data is based on year {year}.
 
      Examples:
-     "路特斯科技的季度营收是多少？" should be rewritten as "What is Lotus Tech's quarterly revenue in {year}?".
-     "路特斯科技的用户画像是什么?" should be rewritten as "What is the user profile for Lotus Technology?" (without adding year information)
+     "Lotus Technology's quarterly revenue is how much in {year}?" should be rewritten as "What is Lotus Tech's quarterly revenue in {year}?".
+     "Lotus Technology's user profile is what?" should be rewritten as "What is the user profile for Lotus Technology?" (without adding year information)
 
 2. **Identify the relevant date or any explicit or implied time reference based on the user's question and the conversation history.**
    - If no specific time is mentioned, use the current date as the default reference time.
@@ -40,27 +40,19 @@ def get_if_query_rag_prompt(question, qa_history):
     Any question that involves details about car models, electric vehicles, or mentions keywords such as Lotus, their specifications, history, or technical data, or that refers to company-related information about Lotus (e.g., company status, financial data, stock listing, etc.), as well as requests for specific information from a business combination, financial data, or legal aspects from a proxy statement or prospectus, should be categorized as requiring the specific dataset (Answer: YES).
     Here are some example questions related to the datasets:									
         "What engine was used in the Mark I car?"
-        "Emeya是什么时候推出的?"
+        "When was Emeya launched?"
         "How many Mark II cars were built?"
         "Can you provide the specifications for the Mark VI?"
         "What are the production years for the Mark VIII?"
         "What is the user profile for Lotus Technology?"
         "What are the risk factors listed in the Lotus Tech prospectus?"
         "Can you tell me about the voting procedures for the extraordinary general meeting in LCAA's proxy statement?"
-        "请给我介绍一下最新的电车" (Tell me about the latest electric cars)
+        "Tell me about the latest electric cars" (Tell me about the latest electric cars)
         "How many Momenta convertible Note has in owership of total shares? "
-        "介绍一下Kershaw Health Limited" (What is Kershaw Health Limited?)
-        "简单描述一下Meritz的交易"
+        "What is Kershaw Health Limited?" (What is Kershaw Health Limited?)
+        "Describe the transaction of Meritz" (Describe the transaction of Meritz)
 																   
-
-    - If the question is general or not related to these specific datasets (e.g., weather, general knowledge, or unrelated topics), categorize it as not requiring the dataset (Answer: NO).
-      For such questions, the answer should be categorized as not requiring the specific dataset (Answer: NO).
-      General daily questions might include:
-          "What's the weather like today?"
-          "How do I make a cup of coffee?"
-          "What's the capital of France?"
-          "What time is it?"
-     
+    - If the question is general or not related to these specific datasets (e.g., weather, general knowledge, or unrelated topics), categorize it as not requiring the dataset (Answer: NO). For such questions, the answer should be categorized as not requiring the specific dataset (Answer: NO). General daily questions might include: "What's the weather like today?", "How do I make a cup of coffee?", "What's the capital of France?", "What time is it?"
           
 Here is the Q&A history:
 {qa_history}

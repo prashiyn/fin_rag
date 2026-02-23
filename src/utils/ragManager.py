@@ -62,24 +62,33 @@ class RAGManager:
                 self.create_collection(collection)
                 self._retrievers.append(self.create_retriever(top_k, collection, retriever_type="ensemble"))
 
-        
+    def _chroma_kwargs(self, chroma_collection_name: str, subpath: str):
+        """Return kwargs for LangChain Chroma: client-server (host/port) or local (persist_directory)."""
+        host = self._config.get("chroma_server_host")
+        port = self._config.get("chroma_server_port", 8000)
+        if host:
+            return {
+                "collection_name": chroma_collection_name,
+                "embedding_function": self.embeddings,
+                "host": host,
+                "port": int(port),
+                "relevance_score_fn": "cosine",
+            }
+        persist_dir = os.path.join(self._config["persist_directory"], subpath)
+        return {
+            "collection_name": chroma_collection_name,
+            "embedding_function": self.embeddings,
+            "persist_directory": persist_dir,
+            "relevance_score_fn": "cosine",
+        }
+
     def create_collection(self, collection_name: str):
         """Create a new collection with all supported retrievers"""
         if collection_name not in self._collections:
-            # Initialize Chroma
-            chroma = Chroma(
-                collection_name=collection_name,
-                embedding_function=self.embeddings,
-                persist_directory=os.path.join(self._config['persist_directory'], "chroma"),
-                relevance_score_fn="cosine" # l2, ip, cosine
-            )
-            
-            ts_chroma = Chroma(
-                collection_name=collection_name,
-                embedding_function=self.embeddings,
-                persist_directory=os.path.join(self._config['persist_directory'], "ts_chroma"),
-                relevance_score_fn="cosine" # l2, ip, cosine
-            )
+            # Main chunks: collection_name. Title-summary: collection_name_ts (same name in local mode per subpath).
+            chroma = Chroma(**self._chroma_kwargs(collection_name, "chroma"))
+            ts_collection = f"{collection_name}_ts" if self._config.get("chroma_server_host") else collection_name
+            ts_chroma = Chroma(**self._chroma_kwargs(ts_collection, "ts_chroma"))
             self._collections[collection_name] = (chroma, ts_chroma)
             import torch
             logger.warning("Load Chroma: Max CUDA memory allocated: {} GB".format(torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024)))

@@ -1,0 +1,22 @@
+---
+description: FastAPI server patterns for API routes, auth, and SSE
+globs: "**/server*.py"
+alwaysApply: false
+---
+
+# FastAPI Server
+
+- **App**: Single FastAPI app (e.g. in `src/main.py` or `src/server.py`). Use `lifespan` or `@asynccontextmanager` for startup/shutdown (load RAGManager, ChatService, cleanup timers); avoid global app-state mutation outside lifespan.
+- **Config**: Load YAML once in lifespan; inject settings via `Depends()` (e.g. `get_config()`) or request.app.state so routes stay testable.
+- **Auth**: Bearer token on protected routes. Use `HTTPBearer` security scheme and a dependency that validates against config bearer token; return 401 with JSON body `{"status":"error","message":"..."}` on failure.
+- **Responses**: Use Pydantic models for success/error payloads. Consistent envelope: `{"status":"success"|"error","message":"...","data":...}`. Use `JSONResponse` with status_code for errors.
+- **SSE**: For streaming (e.g. chat), use `StreamingResponse` with `media_type="text/event-stream"`. Yield chunks in `data: {json}\n\n` format; keep same semantics as current `/api_chat_stream` (response_id in first chunk, etc.).
+- **Sync code**: Wrap blocking calls (e.g. RAG, DB) in `run_in_executor` or use `async def` only for I/O that has an async driver; do not block the event loop with CPU/heavy sync work in async route handlers without offloading.
+
+```python
+# Auth dependency sketch
+async def require_bearer_token(credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer())):
+    if credentials.credentials != settings.bearer_token:
+        raise HTTPException(401, detail={"status": "error", "message": "Invalid bearer token"})
+    return credentials.credentials
+```

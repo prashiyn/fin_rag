@@ -1,29 +1,41 @@
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import chromadb
 from chromadb.config import Settings
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 import uuid
 
 class QAChromaLoader:
-    def __init__(self, persist_directory: str = "./chroma_db", collection_name: str = "lotus_qa",
-                 embeddings_model_name: str = "BAAI/bge-m3"):
-        self.persist_directory = persist_directory
+    def __init__(
+        self,
+        persist_directory: Optional[str] = None,
+        collection_name: str = "lotus_qa",
+        embeddings_model_name: str = "BAAI/bge-m3",
+        chroma_server_host: Optional[str] = None,
+        chroma_server_port: Optional[int] = None,
+    ):
         self.collection_name = collection_name
         self.embeddings_model_name = embeddings_model_name
+        self.persist_directory = persist_directory or "./chroma_db"
 
         self.embedding_function = SentenceTransformerEmbeddingFunction(
             model_name=self.embeddings_model_name
         )
-        
-        self.client = chromadb.PersistentClient(
-            path=persist_directory,
-            settings=Settings(
-                anonymized_telemetry=False,
-                allow_reset=True
+
+        settings = Settings(anonymized_telemetry=False, allow_reset=True)
+        if chroma_server_host:
+            port = int(chroma_server_port or 8000)
+            self.client = chromadb.HttpClient(
+                host=chroma_server_host,
+                port=port,
+                settings=settings,
             )
-        )
-        
+        else:
+            self.client = chromadb.PersistentClient(
+                path=self.persist_directory,
+                settings=settings,
+            )
+
         self.collection = self._create_or_get_collection()
         
     def _create_or_get_collection(self):
@@ -122,14 +134,21 @@ class QAChromaLoader:
 
 
 
-def load_qa_chroma_instance(qa_data_path: str, persist_directory: str = "./chroma_db"):
-    with open(qa_data_path, 'r', encoding='utf-8') as f:
+def load_qa_chroma_instance(
+    qa_data_path: str,
+    persist_directory: Optional[str] = "./chroma_db",
+    chroma_server_host: Optional[str] = None,
+    chroma_server_port: Optional[int] = None,
+):
+    with open(qa_data_path, "r", encoding="utf-8") as f:
         qa_data = json.load(f)
 
     qa_loader = QAChromaLoader(
         persist_directory=persist_directory,
         collection_name="lotus_qa",
-        embeddings_model_name="BAAI/bge-m3"
+        embeddings_model_name="BAAI/bge-m3",
+        chroma_server_host=chroma_server_host,
+        chroma_server_port=chroma_server_port,
     )
     # qa_loader.reset_collection()
     qa_loader.load_qa_data(qa_data)    

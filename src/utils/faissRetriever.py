@@ -40,22 +40,31 @@ class FaissRetriever:
 if __name__ == "__main__":
     import os
     import yaml
-    config_path = os.getenv('CONFIG_PATH', '../../config/config_vllm.yaml')
-    with open(config_path, 'r') as file:
+    config_path = os.getenv("CONFIG_PATH", "../../config/config_vllm.yaml")
+    with open(config_path, "r") as file:
         config = yaml.safe_load(file)
 
-    persist_directory = os.path.join(config['persist_directory'], "chroma")
-    embeddings_model_name = config['embeddings_model_name']
+    embeddings_model_name = config["embeddings_model_name"]
     embeddings = HuggingFaceEmbeddings(model_name=embeddings_model_name)
 
     from langchain_chroma import Chroma
-    chroma = Chroma(
-        collection_name="lotus",
-        embedding_function =embeddings,
-        persist_directory=persist_directory,
-        relevance_score_fn="l2" # l2, ip, cosine
-    )
-    
+    host = config.get("chroma_server_host")
+    if host:
+        chroma = Chroma(
+            collection_name="lotus",
+            embedding_function=embeddings,
+            host=host,
+            port=int(config.get("chroma_server_port", 8000)),
+            relevance_score_fn="l2",
+        )
+    else:
+        chroma = Chroma(
+            collection_name="lotus",
+            embedding_function=embeddings,
+            persist_directory=os.path.join(config["persist_directory"], "chroma"),
+            relevance_score_fn="l2",
+        )
+
     docs = chroma.get(include=["metadatas", "embeddings"])
     retriever = FaissRetriever(docs['embeddings'], embeddings)
 
