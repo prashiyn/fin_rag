@@ -58,7 +58,7 @@ def create_frequent_qa_database(db_path):
         last_updated TIMESTAMP,
         updated_by TEXT,
         is_active BOOLEAN DEFAULT TRUE,
-        {period_sql}                        -- 动态插入所有时间段字段
+        {period_sql}                        -- Dynamically insert all time period fields
     );
     """
 

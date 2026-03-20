@@ -1,4 +1,5 @@
 import json
+import os
 from typing import List, Dict, Any, Optional
 import chromadb
 from chromadb.config import Settings
@@ -10,12 +11,12 @@ class QAChromaLoader:
         self,
         persist_directory: Optional[str] = None,
         collection_name: str = "lotus_qa",
-        embeddings_model_name: str = "BAAI/bge-m3",
+        embeddings_model_name: Optional[str] = None,
         chroma_server_host: Optional[str] = None,
         chroma_server_port: Optional[int] = None,
     ):
         self.collection_name = collection_name
-        self.embeddings_model_name = embeddings_model_name
+        self.embeddings_model_name = embeddings_model_name or os.environ.get("EMBEDDINGS_MODEL_NAME", "BAAI/bge-m3")
         self.persist_directory = persist_directory or "./chroma_db"
 
         self.embedding_function = SentenceTransformerEmbeddingFunction(
@@ -139,6 +140,7 @@ def load_qa_chroma_instance(
     persist_directory: Optional[str] = "./chroma_db",
     chroma_server_host: Optional[str] = None,
     chroma_server_port: Optional[int] = None,
+    embeddings_model_name: Optional[str] = None,
 ):
     with open(qa_data_path, "r", encoding="utf-8") as f:
         qa_data = json.load(f)
@@ -146,7 +148,7 @@ def load_qa_chroma_instance(
     qa_loader = QAChromaLoader(
         persist_directory=persist_directory,
         collection_name="lotus_qa",
-        embeddings_model_name="BAAI/bge-m3",
+        embeddings_model_name=embeddings_model_name,
         chroma_server_host=chroma_server_host,
         chroma_server_port=chroma_server_port,
     )
@@ -160,7 +162,7 @@ if __name__ == "__main__":
     qa_table_persist_directory = '/root/autodl-tmp/hyc_production/RAG_Agent/log/qa_chroma_bge/'
 
     # qa_loader = load_qa_chroma_instance(qa_data_path = qa_data, persist_directory = qa_table_persist_directory)
-    qa_loader = QAChromaLoader(persist_directory = qa_table_persist_directory, collection_name = "lotus_qa", embeddings_model_name="BAAI/bge-m3")
+    qa_loader = QAChromaLoader(persist_directory=qa_table_persist_directory, collection_name="lotus_qa")
 
     # results = qa_loader.query_qa("What is the sales volume", n_results=3)
     # results = qa_loader.query_qa("What is Lotus Tech's service sales revenue?", n_results=3)

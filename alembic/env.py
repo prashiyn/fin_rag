@@ -1,10 +1,16 @@
 """
 Alembic env: uses config/production.yaml (or CONFIG_PATH) database_url for migrations.
-Autogenerate detects changes in src/models.py. Run: alembic revision --autogenerate -m "msg"
+DATABASE_URL env (e.g. from .env) overrides config. Autogenerate: alembic revision --autogenerate -m "msg"
 """
 import os
 import sys
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env from project root so DATABASE_URL / CONFIG_PATH are set
+_project_root = Path(__file__).resolve().parent.parent
+load_dotenv(_project_root / ".env")
 
 import yaml
 from sqlalchemy import engine_from_config
@@ -12,7 +18,6 @@ from sqlalchemy import pool
 from alembic import context
 
 # Ensure src is on path so "from models import Base" works
-_project_root = Path(__file__).resolve().parent.parent
 _src = _project_root / "src"
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))

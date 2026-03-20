@@ -2,7 +2,7 @@ import os
 import yaml
 import logging
 logger = logging.getLogger(__name__)
-
+import torch
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -49,7 +49,6 @@ class RAGManager:
             logger.info("Loading embedding model...")
             self.embeddings = HuggingFaceEmbeddings(model_name=self.embeddings_model_name)
             logger.info("Embedding model loaded successfully.")
-            import torch
             logger.warning("Load Embedding model: Max CUDA memory allocated: {} GB".format(torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024)))
             
         except Exception as e:
@@ -90,7 +89,6 @@ class RAGManager:
             ts_collection = f"{collection_name}_ts" if self._config.get("chroma_server_host") else collection_name
             ts_chroma = Chroma(**self._chroma_kwargs(ts_collection, "ts_chroma"))
             self._collections[collection_name] = (chroma, ts_chroma)
-            import torch
             logger.warning("Load Chroma: Max CUDA memory allocated: {} GB".format(torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024)))
 
     def get_collection_documents(self, collection_name: str, doc_ids: Optional[List[str]] = None) -> List[Document]:

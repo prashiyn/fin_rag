@@ -78,7 +78,7 @@ class ChatService:
         self.rag_manager: RAGManager = rag_manager
         self.base_url: str = config.get('llm_base_url')
         self.model_name: str = config.get('llm_model_name')
-        self.api_key: str = config.get('llm_api_key', 'EMPTY')
+        self.api_key: str = config.get('llm_api_key')
         self.rerank_topk = rerank_topk
         self.session_timeout = session_timeout
         # Lock to access the api_chat_manager dict
@@ -86,7 +86,7 @@ class ChatService:
 
         # Lock to ensure only one chat_manager can call self.reranker.compute_score at the same time
         self.reranker_lock = threading.Lock()
-        
+
         self.reranker = FlagLLMReranker(config.get('rerank_model'), devices='cuda', use_fp16=True)
         self.frequent_qa_db = config.get("frequent_qa_directory")
         self.qa_table_directory = config.get("qa_table_directory")
@@ -94,7 +94,7 @@ class ChatService:
         self.qa_loader = QAChromaLoader(
             persist_directory=config.get("qa_table_persist_directory"),
             collection_name="lotus_qa",
-            embeddings_model_name=config.get("embeddings_model_name", "BAAI/bge-m3"),
+            embeddings_model_name=config.get("embeddings_model_name"),
             chroma_server_host=config.get("chroma_server_host"),
             chroma_server_port=config.get("chroma_server_port"),
         )

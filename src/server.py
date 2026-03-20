@@ -15,12 +15,19 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Timer
+from typing import Any, Optional
+
+from dotenv import load_dotenv
+
+# Load .env from project root so CONFIG_PATH, DATABASE_URL, PORT, BEARER_TOKEN, etc. are set
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 import requests
 import yaml
-from fastapi import FastAPI, Request, Depends
+from fastapi import FastAPI, Request, Depends, Body, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
 from starlette.templating import Jinja2Templates
 
@@ -28,6 +35,7 @@ from database import close_db, get_session, init_db
 from models import Feedback
 from utils.ragManager import RAGManager
 from utils.vllmChatService import ChatService
+from services.feedback_processor import process_feedback_records
 
 # ---------------------------------------------------------------------------
 # Config and DB (used in lifespan and routes)
@@ -38,9 +46,69 @@ LOG_PATH = PROJECT_ROOT / "server.log"
 BACKUP_DIR = Path("/root/autodl-tmp/server_logs")
 
 
+# ---------------------------------------------------------------------------
+# OpenAPI request/response schemas (for spec and validation)
+# ---------------------------------------------------------------------------
+
+class ApiChatRequest(BaseModel):
+    """Request body for synchronous and streaming chat."""
+    question: str = Field(..., description="User question")
+    session_id: Optional[str] = Field(None, description="Session ID; generated if omitted")
+    internal_input: Optional[Any] = Field(None, description="Optional internal assistant context")
+    interrupt_index: Optional[int] = Field(None, description="Optional interrupt index for editing")
+
+
+class ApiChatResponseData(BaseModel):
+    response: str
+    session_id: str
+    history: list = Field(default_factory=list)
+
+
+class InternalAssistantRequest(BaseModel):
+    """Request body for adding an internal assistant message to a session."""
+    session_id: str = Field(..., description="Session ID")
+    message: str = Field(..., description="Internal assistant message")
+
+
+class ReportErrorRequest(BaseModel):
+    """Request body for reporting a client error."""
+    session_id: str = Field(..., description="Session ID")
+    error_message: str = Field(..., description="Error description from the client")
+
+
+class SubmitRatingRequest(BaseModel):
+    """Request body for submitting feedback rating for a response."""
+    session_id: str = Field(..., description="Session ID")
+    response_id: str = Field(..., description="Response ID from the chat stream")
+    rating: int = Field(..., ge=1, le=5, description="Rating 1-5")
+    question: str = Field(..., description="Original question")
+    response_content: str = Field(..., description="The response text being rated")
+    feedback: Optional[str] = Field(None, description="Optional free-text feedback")
+    user: Optional[str] = Field(None, description="Optional user identifier")
+
+
+class ApiEnvelope(BaseModel):
+    """Standard API response envelope."""
+    status: str = Field(..., description="'success' or 'error'")
+    message: str = Field(..., description="Human-readable message")
+    data: Optional[Any] = Field(None, description="Payload when status is success")
+
+
 def load_config(config_path: str) -> dict:
     with open(config_path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f)
+    if config is None:
+        config = {}
+    # Merge LLM/model defaults from config/llm.yaml so all model keys are defined in one place
+    config_dir = Path(config_path).parent
+    llm_path = config_dir / "llm.yaml"
+    if llm_path.exists():
+        with open(llm_path, encoding="utf-8") as f:
+            llm = yaml.safe_load(f)
+        if llm:
+            for k, v in llm.items():
+                config.setdefault(k, v)
+    return config
 
 
 def get_config_path() -> Path:
@@ -246,13 +314,44 @@ async def lifespan(app: FastAPI):
     app.state.cleanup_timer = cleanup_timer
     logger.info("Initial session cleanup scheduled in 5 minutes")
 
-    database_url = config.get("database_url")
+    database_url = os.getenv("DATABASE_URL") or config.get("database_url")
     if not database_url:
-        raise ValueError("database_url not configured (required for feedback storage)")
+        raise ValueError("database_url not configured (set DATABASE_URL or database_url in config)")
     init_db(database_url)
+
+    # Optional: periodic feedback processing (classify + alias records)
+    feedback_stop = threading.Event()
+    feedback_interval = max(60, int(config.get("feedback_processing_interval_seconds", 600)))
+    feedback_enabled = config.get("feedback_processing_enabled", True)
+    last_id_path = config.get("feedback_last_processed_id_file") or str(PROJECT_ROOT.parent / "log" / "feedback_last_processed_id.txt")
+    categories_path = config.get("feedback_categories_path") or str(PROJECT_ROOT.parent / "config" / "feedback_categories.json")
+
+    def _feedback_loop():
+        while not feedback_stop.is_set():
+            if feedback_stop.wait(timeout=feedback_interval):
+                break
+            if feedback_stop.is_set():
+                break
+            try:
+                process_feedback_records(config, last_id_path, categories_path=categories_path)
+            except Exception as e:
+                logger.exception("Feedback processor error: %s", e)
+
+    if feedback_enabled:
+        feedback_thread = threading.Thread(target=_feedback_loop, daemon=True, name="feedback_processor")
+        feedback_thread.start()
+        app.state.feedback_stop = feedback_stop
+        app.state.feedback_thread = feedback_thread
+        logger.info("Feedback processor started (interval=%ds)", feedback_interval)
+    else:
+        app.state.feedback_stop = None
+        app.state.feedback_thread = None
 
     yield
 
+    # Shutdown: stop feedback processor, cancel cleanup timer, close DB
+    if getattr(app.state, "feedback_stop", None) is not None:
+        app.state.feedback_stop.set()
     # Shutdown: cancel initial and any rescheduled cleanup timer
     cleanup_timer.cancel()
     current = getattr(app.state, "cleanup_timer", None)
@@ -267,8 +366,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="FinSage RAG Agent",
-    description="Multi-retrieval RAG API",
+    description="Multi-retrieval RAG API — chat, streaming, feedback, and internal assistant.",
+    version="0.1.0",
     lifespan=lifespan,
+    tags_metadata=[
+        {"name": "Health", "description": "Liveness and readiness."},
+        {"name": "Auth", "description": "Token validation."},
+        {"name": "Chat", "description": "Synchronous and streaming Q&A."},
+        {"name": "Feedback", "description": "Ratings and feedback UI."},
+        {"name": "Internal", "description": "Internal assistant and error reporting."},
+        {"name": "Logs", "description": "Session logs."},
+    ],
 )
 
 app.add_middleware(
@@ -300,34 +408,36 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Routes
 # ---------------------------------------------------------------------------
 
-@app.get("/health")
+@app.get("/health", tags=["Health"], summary="Health check")
 async def health_check():
     return success_response(message="Server is running")
 
 
-@app.get("/api/check_token", dependencies=[Depends(check_token_optional)])
+@app.get("/api/check_token", dependencies=[Depends(check_token_optional)], tags=["Auth"], summary="Validate bearer token")
 async def check_token():
     return success_response(message="Token is valid")
 
 
-@app.post("/api_chat")
+@app.post(
+    "/api_chat",
+    tags=["Chat"],
+    summary="Synchronous Q&A",
+    response_model=ApiEnvelope,
+    responses={400: {"description": "Bad request (e.g. question not provided)"}},
+)
 async def api_chat(
+    body: ApiChatRequest,
     request: Request,
     _: str = Depends(require_bearer_token),
 ):
     try:
-        body = await request.json()
-        question = body.get("question")
-        session_id = body.get("session_id") or str(uuid.uuid4())
-        internal_input = body.get("internal_input")
-        interrupt_index = body.get("interrupt_index")
-
-        if not question:
+        session_id = body.session_id or str(uuid.uuid4())
+        if not body.question:
             return error_response(message="Question not provided")
 
         chat_service = request.app.state.chat_service
         response_text, _, _, _, _, _, history = chat_service.generate_response_async(
-            question, session_id, internal_input, interrupt_index
+            body.question, session_id, body.internal_input, body.interrupt_index
         )
         return success_response(
             data={
@@ -391,28 +501,32 @@ def _stream_chat(app_ref, question, session_id, internal_input, interrupt_index)
         app_ref.state.logger.error("Error saving Q&A to database: %s", e)
 
 
-@app.post("/api_chat_stream")
+@app.post(
+    "/api_chat_stream",
+    tags=["Chat"],
+    summary="Streaming Q&A (SSE)",
+    responses={
+        200: {"description": "SSE stream of chunks", "content": {"text/event-stream": {}}},
+        400: {"description": "Bad request"},
+    },
+)
 async def api_chat_stream(
+    body: ApiChatRequest,
     request: Request,
     _: str = Depends(require_bearer_token),
 ):
     try:
-        body = await request.json()
-        question = body.get("question")
-        session_id = body.get("session_id") or str(uuid.uuid4())
-        internal_input = body.get("internal_input")
-        interrupt_index = body.get("interrupt_index")
-
-        if not question:
+        session_id = body.session_id or str(uuid.uuid4())
+        if not body.question:
             return error_response(message="Question not provided")
 
         return StreamingResponse(
             _stream_chat(
                 request.app,
-                question,
+                body.question,
                 session_id,
-                internal_input,
-                interrupt_index,
+                body.internal_input,
+                body.interrupt_index,
             ),
             media_type="text/event-stream",
         )
@@ -423,7 +537,7 @@ async def api_chat_stream(
         return error_response(message=str(e))
 
 
-@app.get("/test_api_chat")
+@app.get("/test_api_chat", tags=["Chat"], summary="Test chat UI (returns HTML)")
 async def test_api_chat(request: Request):
     session_id = str(uuid.uuid4())
     chat_service = request.app.state.chat_service
@@ -434,7 +548,7 @@ async def test_api_chat(request: Request):
     )
 
 
-@app.get("/feedback")
+@app.get("/feedback", tags=["Feedback"], summary="Feedback list UI (returns HTML)")
 async def feedback(request: Request):
     try:
         with get_session() as session:
@@ -465,27 +579,29 @@ async def feedback(request: Request):
         return error_response(message=str(e), status_code=500)
 
 
-@app.post("/api/internal_assistant")
+@app.post(
+    "/api/internal_assistant",
+    tags=["Internal"],
+    summary="Add internal assistant message to a session",
+    response_model=ApiEnvelope,
+)
 async def internal_assistant(
+    body: InternalAssistantRequest,
     request: Request,
     _: str = Depends(require_bearer_token),
 ):
     try:
-        body = await request.json()
-        session_id = body.get("session_id")
-        internal_message = body.get("message")
-
-        if not session_id:
+        if not body.session_id:
             return error_response(message="Session ID not provided")
-        if not internal_message:
+        if not body.message:
             return error_response(message="Internal assistant message not provided")
 
         chat_service = request.app.state.chat_service
-        chat_manager = chat_service.get_or_create_chat_manager(session_id)
-        chat_manager.add_internal_assitant_message(internal_message)
+        chat_manager = chat_service.get_or_create_chat_manager(body.session_id)
+        chat_manager.add_internal_assitant_message(body.message)
         return success_response(
             data={
-                "session_id": session_id,
+                "session_id": body.session_id,
                 "status": "Internal assistant message added successfully",
             }
         )
@@ -496,13 +612,19 @@ async def internal_assistant(
         return error_response(message=str(e))
 
 
-@app.get("/api/log")
+@app.get(
+    "/api/log",
+    tags=["Logs"],
+    summary="Get runtime log for a session",
+    response_model=ApiEnvelope,
+    responses={400: {"description": "Session ID not provided"}},
+)
 async def get_log(
     request: Request,
+    session_id: Optional[str] = Query(None, description="Session ID"),
     _: str = Depends(require_bearer_token),
 ):
     try:
-        session_id = request.query_params.get("session_id")
         if not session_id:
             return error_response(message="Session ID not provided")
         chat_service = request.app.state.chat_service
@@ -515,23 +637,25 @@ async def get_log(
         return error_response(message=str(e))
 
 
-@app.post("/api/report_error")
+@app.post(
+    "/api/report_error",
+    tags=["Internal"],
+    summary="Report client error and save session log",
+    response_model=ApiEnvelope,
+)
 async def report_error(
+    body: ReportErrorRequest,
     request: Request,
     _: str = Depends(require_bearer_token),
 ):
     try:
-        body = await request.json()
-        session_id = body.get("session_id")
-        error_message = body.get("error_message")
-
-        if not session_id:
+        if not body.session_id:
             return error_response(message="Session ID not provided")
-        if not error_message:
+        if not body.error_message:
             return error_response(message="Error message not provided")
 
         chat_service = request.app.state.chat_service
-        chat_manager = chat_service.get_or_create_chat_manager(session_id)
+        chat_manager = chat_service.get_or_create_chat_manager(body.session_id)
         logs = chat_manager.get_runtime_log()
 
         error_log_dir = PROJECT_ROOT.parent / "log" / "error"
@@ -539,8 +663,8 @@ async def report_error(
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         error_report = {
             "timestamp": ts,
-            "session_id": session_id,
-            "error_message": error_message,
+            "session_id": body.session_id,
+            "error_message": body.error_message,
             "session_log": logs,
         }
         error_file_path = error_log_dir / f"{ts}.json"
@@ -555,31 +679,24 @@ async def report_error(
         return error_response(message=str(e))
 
 
-@app.post("/api/submit_rating")
+@app.post(
+    "/api/submit_rating",
+    tags=["Feedback"],
+    summary="Submit rating and optional feedback for a response",
+    response_model=ApiEnvelope,
+    responses={400: {"description": "Missing required fields or invalid rating"}},
+)
 async def submit_rating(
+    body: SubmitRatingRequest,
     request: Request,
     _: str = Depends(require_bearer_token),
 ):
     try:
-        body = await request.json()
-        session_id = body.get("session_id")
-        response_id = body.get("response_id")
-        feedback = body.get("feedback")
-        question = body.get("question")
-        response_content = body.get("response_content")
-        user = body.get("user", "")
-
-        rating_raw = body.get("rating")
-        try:
-            rating = int(rating_raw)
-        except (TypeError, ValueError):
-            return error_response(message="Invalid rating value")
-
-        if not session_id or not response_id or not question or not response_content:
+        if not body.session_id or not body.response_id or not body.question or not body.response_content:
             return error_response(message="Missing required fields")
 
         chat_service = request.app.state.chat_service
-        chat_manager = chat_service.get_or_create_chat_manager(session_id)
+        chat_manager = chat_service.get_or_create_chat_manager(body.session_id)
         log = chat_manager.get_runtime_log()
         config = request.app.state.config
 
@@ -587,36 +704,36 @@ async def submit_rating(
             row = (
                 session.query(Feedback)
                 .filter(
-                    Feedback.session_id == session_id,
-                    Feedback.response_id == response_id,
+                    Feedback.session_id == body.session_id,
+                    Feedback.response_id == body.response_id,
                 )
                 .first()
             )
             if row:
-                row.rating = rating
-                row.feedback = feedback
-                row.question = question
-                row.response = response_content
+                row.rating = body.rating
+                row.feedback = body.feedback
+                row.question = body.question
+                row.response = body.response_content
                 row.log = json.dumps(log)
-                row.user = user
+                row.user = body.user or ""
             else:
                 session.add(
                     Feedback(
-                        session_id=session_id,
-                        response_id=response_id,
-                        rating=rating,
-                        feedback=feedback,
-                        question=question,
-                        response=response_content,
+                        session_id=body.session_id,
+                        response_id=body.response_id,
+                        rating=body.rating,
+                        feedback=body.feedback,
+                        question=body.question,
+                        response=body.response_content,
                         log=json.dumps(log),
-                        user=user,
+                        user=body.user or "",
                     )
                 )
 
         online_answer = None
-        if rating <= 2:
+        if body.rating <= 2:
             online_answer = handle_low_rating(
-                config, session_id, feedback or "", question, response_content
+                config, body.session_id, body.feedback or "", body.question, body.response_content
             )
 
         return success_response(
