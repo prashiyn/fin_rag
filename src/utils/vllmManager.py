@@ -3,7 +3,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 import ast
-import openai
 import torch
 import threading
 import pandas as pd
@@ -12,6 +11,10 @@ from pydantic import BaseModel
 import prompts
 from .profiler import profiler
 import asyncio
+try:
+    from src.services.doc_processing_llm import DocProcessingLLMClient
+except ImportError:
+    from services.doc_processing_llm import DocProcessingLLMClient
 
 class IfQueryRagResp(BaseModel):
     need_rag: bool
@@ -19,19 +22,13 @@ class IfQueryRagResp(BaseModel):
     rewritten: List[str]
 
 class ChatManager:
-    def __init__(self, session_id, base_url, api_key, model_name, reranker, chunk_topk = 5, history_limit=20, reranker_lock=None):
+    def __init__(self, session_id, config, model_name, reranker, chunk_topk = 5, history_limit=20, reranker_lock=None):
         assert history_limit % 2 == 0, "history_limit must be an even number"
         self.session_id = session_id
-        self.base_url = base_url
         self.model_name = model_name
-        self.llm = openai.OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-        )
-        self.async_llm = openai.AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-        )
+        self._llm_client = DocProcessingLLMClient.from_config(config)
+        self.llm = self._llm_client.as_openai_compat()
+        self.async_llm = self._llm_client.as_async_openai_compat()
 
         self.reranker = reranker
         

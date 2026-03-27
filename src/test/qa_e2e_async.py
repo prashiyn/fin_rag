@@ -64,6 +64,7 @@ if __name__ == "__main__":
     logger = logging.getLogger(__name__)
 
     collections = {'lotus': 10}
+    collection_name = "lotus"
     # collections = {'zeekr': 10}
     logger.warning("Before loading: Max CUDA memory allocated: {} GB".format(torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024)))
     rag_manager = RAGManager(config=config, collections=collections)
@@ -122,11 +123,11 @@ if __name__ == "__main__":
             # Process question
             st_time = time.time()
             answer, rag_context, rag_info, rewritten_question, hypo_chunk_content, all_retrieved_content, history = chat_service.generate_response_async(
-                question, session_id, internal_input=None, interrupt_index=None
+                question, session_id, collection_name, internal_input=None, interrupt_index=None
             )
             duration = time.time() - st_time
             
-            complete_input, need_rag = chat_service.get_test_info(session_id)
+            complete_input, need_rag = chat_service.get_test_info(session_id, collection_name)
             
             # Create question result dictionary
             question_result = {
@@ -144,7 +145,7 @@ if __name__ == "__main__":
             # question_result["complete_input"] = complete_input
                 
             if judge_answer:
-                judge_score, reason = chat_service.api_chat_manager[session_id]['manager'].evaluate(
+                judge_score, reason = chat_service.get_or_create_chat_manager(session_id, collection_name).evaluate(
                     answer, expected_answer
                 )
                 sum_score += judge_score
@@ -156,7 +157,7 @@ if __name__ == "__main__":
             
             results["questions"].append(question_result)
             
-        chat_service.api_chat_manager[session_id]['manager'].clear_chat_history()
+        chat_service.get_or_create_chat_manager(session_id, collection_name).clear_chat_history()
         
         # Save results to JSON file
         output_file = os.path.join(DIR_PATH, f'question_{i}_{i+BATCH_SIZE-1}.json')

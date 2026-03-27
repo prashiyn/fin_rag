@@ -30,6 +30,33 @@ paths:
               schema: {}
       security:
       - HTTPBearer: []
+  /load-data:
+    post:
+      tags:
+      - Ingestion
+      summary: Create/load collection data into Chroma + BM25
+      operationId: load_data_load_data_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoadDataRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
   /api_chat:
     post:
       tags:
@@ -94,12 +121,27 @@ paths:
       - Chat
       summary: Test chat UI (returns HTML)
       operationId: test_api_chat_test_api_chat_get
+      parameters:
+      - name: collection_name
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Collection name
+          title: Collection Name
+        description: Collection name
       responses:
         '200':
           description: Successful Response
           content:
             application/json:
               schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /feedback:
     get:
       tags:
@@ -148,6 +190,14 @@ paths:
       security:
       - HTTPBearer: []
       parameters:
+      - name: collection_name
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Collection name
+          title: Collection Name
+        description: Collection name
       - name: session_id
         in: query
         required: false
@@ -167,6 +217,90 @@ paths:
                 $ref: '#/components/schemas/ApiEnvelope'
         '400':
           description: Session ID not provided
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/treerag/tree:
+    get:
+      tags:
+      - Chat
+      summary: Get last TreeRAG tree for a session
+      operationId: treerag_tree_api_treerag_tree_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: collection_name
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Collection name
+          title: Collection Name
+        description: Collection name
+      - name: session_id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Session ID
+          title: Session Id
+        description: Session ID
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/treerag/node:
+    get:
+      tags:
+      - Chat
+      summary: Get details for a TreeRAG node
+      operationId: treerag_node_api_treerag_node_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: collection_name
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Collection name
+          title: Collection Name
+        description: Collection name
+      - name: session_id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Session ID
+          title: Session Id
+        description: Session ID
+      - name: node_id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Node ID
+          title: Node Id
+        description: Node ID
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope'
         '422':
           description: Validation Error
           content:
@@ -233,6 +367,10 @@ components:
   schemas:
     ApiChatRequest:
       properties:
+        collection_name:
+          type: string
+          title: Collection Name
+          description: Collection to query
         question:
           type: string
           title: Question
@@ -255,8 +393,22 @@ components:
           - type: 'null'
           title: Interrupt Index
           description: Optional interrupt index for editing
+        strategy:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Strategy
+          description: Optional strategy override. Use 'treerag' to enable TreeRAG for this request.
+        treerag_max_depth:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Treerag Max Depth
+          description: Optional TreeRAG max depth override when strategy='treerag'.
+          minimum: 0
       type: object
       required:
+      - collection_name
       - question
       title: ApiChatRequest
       description: Request body for synchronous and streaming chat.
@@ -282,6 +434,66 @@ components:
       - message
       title: ApiEnvelope
       description: Standard API response envelope.
+    Chunk:
+      properties:
+        chunk_id:
+          type: string
+          title: Chunk Id
+        content:
+          type: string
+          title: Content
+        type:
+          type: string
+          enum:
+          - text
+          - table
+          - image
+          title: Type
+        doc_id:
+          type: string
+          title: Doc Id
+        page:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Page
+        bundle_id:
+          type: string
+          title: Bundle Id
+        section_title:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Section Title
+        title_summary:
+          type: string
+          title: Title Summary
+          default: ''
+        publish_date:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Publish Date
+        prev_chunk:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Prev Chunk
+        next_chunk:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Next Chunk
+      type: object
+      required:
+      - chunk_id
+      - content
+      - type
+      - doc_id
+      - bundle_id
+      title: Chunk
+      description: 'Canonical chunk object: content (original text/table/image), type,
+        and metadata.'
     HTTPValidationError:
       properties:
         detail:
@@ -293,6 +505,10 @@ components:
       title: HTTPValidationError
     InternalAssistantRequest:
       properties:
+        collection_name:
+          type: string
+          title: Collection Name
+          description: Collection to operate on
         session_id:
           type: string
           title: Session Id
@@ -303,12 +519,56 @@ components:
           description: Internal assistant message
       type: object
       required:
+      - collection_name
       - session_id
       - message
       title: InternalAssistantRequest
       description: Request body for adding an internal assistant message to a session.
+    LoadDataContent:
+      properties:
+        page_start:
+          type: integer
+          title: Page Start
+          description: Start page for ingest filter
+        page_end:
+          type: integer
+          title: Page End
+          description: End page for ingest filter
+        page_date_published:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Page Date Published
+          description: Document publish date
+        chunks:
+          items:
+            $ref: '#/components/schemas/Chunk'
+          type: array
+          title: Chunks
+      type: object
+      required:
+      - page_start
+      - page_end
+      - chunks
+      title: LoadDataContent
+    LoadDataRequest:
+      properties:
+        collection:
+          type: string
+          title: Collection
+        data:
+          $ref: '#/components/schemas/LoadDataContent'
+      type: object
+      required:
+      - collection
+      - data
+      title: LoadDataRequest
     ReportErrorRequest:
       properties:
+        collection_name:
+          type: string
+          title: Collection Name
+          description: Collection to operate on
         session_id:
           type: string
           title: Session Id
@@ -319,12 +579,17 @@ components:
           description: Error description from the client
       type: object
       required:
+      - collection_name
       - session_id
       - error_message
       title: ReportErrorRequest
       description: Request body for reporting a client error.
     SubmitRatingRequest:
       properties:
+        collection_name:
+          type: string
+          title: Collection Name
+          description: Collection to operate on
         session_id:
           type: string
           title: Session Id
@@ -361,6 +626,7 @@ components:
           description: Optional user identifier
       type: object
       required:
+      - collection_name
       - session_id
       - response_id
       - rating

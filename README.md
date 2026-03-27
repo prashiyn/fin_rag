@@ -7,7 +7,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue" />
   <img src="https://img.shields.io/badge/API-FastAPI-green" />
-  <img src="https://img.shields.io/badge/LLM-OpenAI%20compatible-orange" />
+  <img src="https://img.shields.io/badge/LLM-doc__processing%20gateway-orange" />
   <img src="https://img.shields.io/badge/Embeddings-BAAI%2Fbge--m3-lightgrey" />
   <img src="https://img.shields.io/badge/Reranker-FlagEmbedding%20%2F%20HF-red" />
 </p>
@@ -69,7 +69,7 @@ graph TD
   D2[FAISS]
   D3[Chroma Title Summary]
   E[Reranker: HF FlagEmbedding]
-  F[LLM: OpenAI compatible]
+  F[LLM APIs: doc_processing /llm/complete + /llm/embeddings]
   G[PostgreSQL: feedback, frequent_qa, qa_table]
   H[Persist: bm25_index]
   I[Persist: chroma]
@@ -95,7 +95,7 @@ graph TD
   1. Prepare the configuration: Copy `config/example.yaml` to `config/production.yaml` (or set `CONFIG_PATH`), and set `chroma_server_host` / `chroma_server_port` for [Chroma client-server mode](https://docs.trychroma.com/guides/deploy/client-server-mode), and `database_url` for PostgreSQL (feedback, frequent QA, qa_table).
   2. Ensure PostgreSQL is running and the database exists, then apply migrations from the project root: `alembic upgrade head`. (See [PostgreSQL and Alembic](#postgresql-and-alembic) below.)
   3. Start the Chroma server (when using client-server): `chroma run --path /path/to/chroma_data` (default port 8000).
-  4. Start an external LLM service compatible with the OpenAI API (e.g. vLLM), and set `llm_base_url` and `llm_model_name` in the configuration.
+  4. Start the doc-processing service and ensure `POST /llm/complete` and `POST /llm/embeddings` are available. Configure `doc_processing_base_url`, `doc_processing_provider`, `llm_model_name`, and `embeddings_model_name`.
   5. Start the API service (requires [uv](https://docs.astral.sh/uv/) and dependencies: `uv sync` from project root).
 
    **From the `src` directory** (recommended):
@@ -141,8 +141,9 @@ persist_directory: "/path/to/database_root"
 embeddings_model_name: "BAAI/bge-m3"
 
 llm_model_name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
-llm_base_url: "http://127.0.0.1:8000/v1" # Requires an external OpenAI-compatible inference service
-llm_api_key: "EMPTY"
+doc_processing_base_url: "http://127.0.0.1:8001" # doc_processing service base URL
+doc_processing_provider: "openai" # provider alias expected by doc_processing /llm/complete
+doc_processing_embeddings_provider: "openai" # optional override for /llm/embeddings
 
 rerank_model: "BAAI/bge-reranker-v2-gemma" # You can enter your HF repository ID
 rerank_topk: 5
@@ -173,6 +174,24 @@ The app uses PostgreSQL for feedback, frequent QA, and qa_table. Set `database_u
 
 Alembic reads the database URL from `config/production.yaml` (or `CONFIG_PATH`) or the `DATABASE_URL` environment variable.
 
+#### LLM Gateway (doc_processing)
+
+This service does not call LLM providers directly from `src/`.
+
+- All runtime LLM requests are routed through `doc_processing` `POST /llm/complete`.
+- All runtime embedding requests are routed through `doc_processing` `POST /llm/embeddings`.
+- Configure these keys in `config/llm.yaml` or `config/production.yaml`:
+  - `doc_processing_base_url`
+  - `doc_processing_provider`
+  - `doc_processing_embeddings_provider` (optional)
+  - `llm_model_name`
+  - `embeddings_model_name`
+- Optional provider overrides:
+  - `feedback_classifier_provider` (for feedback classification jobs)
+  - `treerag_llm_provider` (for TreeRAG planner/answer calls)
+
+You can inspect the contract in `openapi/doc_processing_openapi.json`.
+
 #### Chroma (client-server)
 
 **Chroma (client-server):** When `chroma_server_host` is set, the app uses [Chroma’s HTTP client](https://docs.trychroma.com/guides/deploy/client-server-mode) and connects to a Chroma server. Start the server with `chroma run --path /path/to/chroma_data` (default port 8000). Main and title-summary collections are created as `<collection_name>` and `<collection_name>_ts` on the server. If `chroma_server_host` is omitted, Chroma falls back to local files under `persist_directory` (chroma/ and ts_chroma/).
@@ -182,7 +201,7 @@ Alembic reads the database URL from `config/production.yaml` (or `CONFIG_PATH`) 
 **Notice:**
 - With **Chroma client-server**: `persist_directory` is used only for `bm25_index/<collection_name>/`. Chroma data lives on the Chroma server.
 - With **local Chroma**: `persist_directory` should contain `chroma/`, `ts_chroma/`, and `bm25_index/<collection_name>/`.
-- The current default registered collection is `{'lotus': 10}` (see `src/server.py`); to change the collection or top-k, adjust it in code or config.
+- Collections are discovered from Chroma at startup (or configured via `collections_top_k`).
 
 ## API
 
@@ -204,7 +223,7 @@ Alembic reads the database URL from `config/production.yaml` (or `CONFIG_PATH`) 
   curl -X POST http://127.0.0.1:6005/api_chat \
     -H "Authorization: Bearer <your_token>" \
     -H "Content-Type: application/json" \
-    -d '{"question":"Your question here","session_id":"test-session"}'
+    -d '{"collection_name":"lotus","question":"Your question here","session_id":"test-session"}'
   ```
 
 - **Streaming Q&A (SSE)**
@@ -213,7 +232,7 @@ Alembic reads the database URL from `config/production.yaml` (or `CONFIG_PATH`) 
   curl -N -X POST http://127.0.0.1:6005/api_chat_stream \
     -H "Authorization: Bearer <your_token>" \
     -H "Content-Type: application/json" \
-    -d '{"question":"Your question here","session_id":"test-session"}'
+    -d '{"collection_name":"lotus","question":"Your question here","session_id":"test-session"}'
   ```
 
 ## Production Environment Deployment
@@ -248,9 +267,9 @@ Alembic reads the database URL from `config/production.yaml` (or `CONFIG_PATH`) 
 1. `src/server.log`
 2. Backup directory (will attempt to copy upon receiving an exit signal or when the process terminates): `/root/autodl-tmp/server_logs`
 
-#### 2. External LLM Service Logs
+#### 2. doc_processing Service Logs
 
-Please refer to the log paths and descriptions of your deployed OpenAI-compatible service (such as vLLM).
+Please refer to the logs of your deployed `doc_processing` service that serves `/llm/complete`.
 
 #### 3. User Feedback Log
 

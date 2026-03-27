@@ -32,9 +32,11 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.templating import Jinja2Templates
 
 from database import close_db, get_session, init_db
+from load_document import LoadDataRequest, load_data_into_collection
 from models import Feedback
 from utils.ragManager import RAGManager
 from utils.vllmChatService import ChatService
+from treerag.tree_rag_service import TreeRagService
 from services.feedback_processor import process_feedback_records
 
 # ---------------------------------------------------------------------------
@@ -52,10 +54,20 @@ BACKUP_DIR = Path("/root/autodl-tmp/server_logs")
 
 class ApiChatRequest(BaseModel):
     """Request body for synchronous and streaming chat."""
+    collection_name: str = Field(..., description="Collection to query")
     question: str = Field(..., description="User question")
     session_id: Optional[str] = Field(None, description="Session ID; generated if omitted")
     internal_input: Optional[Any] = Field(None, description="Optional internal assistant context")
     interrupt_index: Optional[int] = Field(None, description="Optional interrupt index for editing")
+    strategy: Optional[str] = Field(
+        None,
+        description="Optional strategy override. Use 'treerag' to enable TreeRAG for this request.",
+    )
+    treerag_max_depth: Optional[int] = Field(
+        None,
+        ge=0,
+        description="Optional TreeRAG max depth override when strategy='treerag'.",
+    )
 
 
 class ApiChatResponseData(BaseModel):
@@ -66,18 +78,21 @@ class ApiChatResponseData(BaseModel):
 
 class InternalAssistantRequest(BaseModel):
     """Request body for adding an internal assistant message to a session."""
+    collection_name: str = Field(..., description="Collection to operate on")
     session_id: str = Field(..., description="Session ID")
     message: str = Field(..., description="Internal assistant message")
 
 
 class ReportErrorRequest(BaseModel):
     """Request body for reporting a client error."""
+    collection_name: str = Field(..., description="Collection to operate on")
     session_id: str = Field(..., description="Session ID")
     error_message: str = Field(..., description="Error description from the client")
 
 
 class SubmitRatingRequest(BaseModel):
     """Request body for submitting feedback rating for a response."""
+    collection_name: str = Field(..., description="Collection to operate on")
     session_id: str = Field(..., description="Session ID")
     response_id: str = Field(..., description="Response ID from the chat stream")
     rating: int = Field(..., ge=1, le=5, description="Rating 1-5")
@@ -108,6 +123,24 @@ def load_config(config_path: str) -> dict:
         if llm:
             for k, v in llm.items():
                 config.setdefault(k, v)
+
+    # Runtime override keys from environment (.env is loaded at module import).
+    # Example: doc_processing_base_url <- env DOC_PROCESSING_BASE_URL.
+    env_override_keys = [
+        "doc_processing_base_url",
+        "doc_processing_provider",
+        "doc_processing_embeddings_provider",
+        "feedback_classifier_provider",
+        "treerag_llm_provider",
+        "test_llm_api_key",
+    ]
+    for key in env_override_keys:
+        val = config.get(key)
+        if val is None or (isinstance(val, str) and not val.strip()):
+            env_name = key.upper()
+            env_val = os.getenv(env_name)
+            if env_val is not None and env_val != "":
+                config[key] = env_val
     return config
 
 
@@ -134,6 +167,16 @@ def error_response(message: str = "An error occurred", data=None, status_code: i
         status_code=status_code,
         content={"status": "error", "message": message, "data": data},
     )
+
+
+def validate_collection_or_error(request: Request, collection_name: str) -> JSONResponse | None:
+    name = (collection_name or "").strip()
+    if not name:
+        return error_response(message="collection_name not provided", status_code=400)
+    rag_manager = request.app.state.rag_manager
+    if not rag_manager.has_collection(name):
+        return error_response(message=f"Collection '{name}' does not exist", status_code=404)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -292,16 +335,30 @@ async def lifespan(app: FastAPI):
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT):
         signal.signal(sig, graceful_exit)
 
-    collections = {"lotus": 10}
-    rag_manager = RAGManager(config=config, collections=collections)
+    rag_manager = RAGManager(config=config, collections=None)
+    configured_collections = config.get("collections_top_k")
+    if isinstance(configured_collections, dict) and configured_collections:
+        for collection_name, top_k in configured_collections.items():
+            if int(top_k) <= 0:
+                continue
+            rag_manager.create_collection(collection_name)
+            rag_manager.upsert_collection_retriever(collection_name, int(top_k))
+    else:
+        default_top_k = int(config.get("default_collection_top_k", 10))
+        rag_manager.hydrate_from_chroma(default_top_k=default_top_k)
     chat_service = ChatService(
         config=config, rag_manager=rag_manager, rerank_topk=config["rerank_topk"]
     )
     app.state.rag_manager = rag_manager
     app.state.chat_service = chat_service
+    app.state.tree_rag_service = TreeRagService(config=config, rag_manager=rag_manager, chat_service=chat_service)
 
     def schedule_cleanup():
         chat_service.cleanup_old_sessions()
+        try:
+            app.state.tree_rag_service.cleanup_old_sessions()
+        except Exception as e:
+            logger.exception("TreeRAG cleanup error: %s", e)
         t = Timer(300, schedule_cleanup)
         t.daemon = True
         t.start()
@@ -373,6 +430,7 @@ app = FastAPI(
         {"name": "Health", "description": "Liveness and readiness."},
         {"name": "Auth", "description": "Token validation."},
         {"name": "Chat", "description": "Synchronous and streaming Q&A."},
+        {"name": "Ingestion", "description": "Collection and chunk ingestion for RAG."},
         {"name": "Feedback", "description": "Ratings and feedback UI."},
         {"name": "Internal", "description": "Internal assistant and error reporting."},
         {"name": "Logs", "description": "Session logs."},
@@ -419,6 +477,27 @@ async def check_token():
 
 
 @app.post(
+    "/load-data",
+    tags=["Ingestion"],
+    summary="Create/load collection data into Chroma + BM25",
+    response_model=ApiEnvelope,
+)
+async def load_data(
+    body: LoadDataRequest,
+    request: Request,
+    _: str = Depends(require_bearer_token),
+):
+    try:
+        rag_manager = request.app.state.rag_manager
+        config = request.app.state.config
+        result = load_data_into_collection(rag_manager, config, body)
+        return success_response(data=result, message="Data loaded successfully")
+    except Exception as e:
+        request.app.state.logger.error("An error occurred in /load-data endpoint: %s", e)
+        return error_response(message=str(e))
+
+
+@app.post(
     "/api_chat",
     tags=["Chat"],
     summary="Synchronous Q&A",
@@ -431,14 +510,34 @@ async def api_chat(
     _: str = Depends(require_bearer_token),
 ):
     try:
+        collection_error = validate_collection_or_error(request, body.collection_name)
+        if collection_error:
+            return collection_error
         session_id = body.session_id or str(uuid.uuid4())
         if not body.question:
             return error_response(message="Question not provided")
 
         chat_service = request.app.state.chat_service
-        response_text, _, _, _, _, _, history = chat_service.generate_response_async(
-            body.question, session_id, body.internal_input, body.interrupt_index
-        )
+        strategy = (body.strategy or "").strip().lower()
+        treerag_enabled = bool(request.app.state.config.get("treerag_enabled", False))
+        use_treerag = strategy == "treerag" or (not strategy and treerag_enabled)
+
+        if use_treerag:
+            tree_service = request.app.state.tree_rag_service
+            response_text, _root = tree_service.run(
+                question=body.question,
+                session_id=session_id,
+                collection_name=body.collection_name,
+                max_depth=body.treerag_max_depth,
+            )
+            # Keep existing session/history behavior for UI parity
+            chat_manager = chat_service.get_or_create_chat_manager(session_id, body.collection_name)
+            chat_manager.add_to_qa_history(body.question, response_text)
+            history = chat_manager.qa_history
+        else:
+            response_text, _, _, _, _, _, history = chat_service.generate_response_async(
+                body.question, session_id, body.collection_name, body.internal_input, body.interrupt_index
+            )
         return success_response(
             data={
                 "response": response_text,
@@ -451,13 +550,13 @@ async def api_chat(
         return error_response(message=str(e))
 
 
-def _stream_chat(app_ref, question, session_id, internal_input, interrupt_index):
+def _stream_chat(app_ref, question, session_id, collection_name, internal_input, interrupt_index):
     """Generator for SSE: yields chunks, then saves Q&A to DB. Uses app_ref.state for DB and logger."""
     full_response = ""
     response_id = str(uuid.uuid4())
     chat_service = app_ref.state.chat_service
     stream_gen = chat_service.generate_response_async_stream(
-        question, session_id, internal_input, interrupt_index
+        question, session_id, collection_name, internal_input, interrupt_index
     )
     for chunk in stream_gen:
         if full_response == "":
@@ -482,7 +581,7 @@ def _stream_chat(app_ref, question, session_id, internal_input, interrupt_index)
         yield chunk
 
     try:
-        chat_manager = chat_service.get_or_create_chat_manager(session_id)
+        chat_manager = chat_service.get_or_create_chat_manager(session_id, collection_name)
         log = chat_manager.get_runtime_log()
         with get_session() as session:
             session.add(
@@ -516,15 +615,28 @@ async def api_chat_stream(
     _: str = Depends(require_bearer_token),
 ):
     try:
+        collection_error = validate_collection_or_error(request, body.collection_name)
+        if collection_error:
+            return collection_error
         session_id = body.session_id or str(uuid.uuid4())
         if not body.question:
             return error_response(message="Question not provided")
+
+        strategy = (body.strategy or "").strip().lower()
+        treerag_enabled = bool(request.app.state.config.get("treerag_enabled", False))
+        use_treerag = strategy == "treerag" or (not strategy and treerag_enabled)
+        if use_treerag:
+            return error_response(
+                message="TreeRAG strategy is not supported for streaming yet. Use /api_chat with strategy='treerag'.",
+                status_code=400,
+            )
 
         return StreamingResponse(
             _stream_chat(
                 request.app,
                 body.question,
                 session_id,
+                body.collection_name,
                 body.internal_input,
                 body.interrupt_index,
             ),
@@ -538,10 +650,13 @@ async def api_chat_stream(
 
 
 @app.get("/test_api_chat", tags=["Chat"], summary="Test chat UI (returns HTML)")
-async def test_api_chat(request: Request):
+async def test_api_chat(request: Request, collection_name: str = Query(..., description="Collection name")):
+    collection_error = validate_collection_or_error(request, collection_name)
+    if collection_error:
+        return collection_error
     session_id = str(uuid.uuid4())
     chat_service = request.app.state.chat_service
-    _ = chat_service.get_or_create_chat_manager(session_id)
+    _ = chat_service.get_or_create_chat_manager(session_id, collection_name)
     return templates.TemplateResponse(
         "test_api.html",
         {"request": request, "session_id": session_id},
@@ -591,13 +706,16 @@ async def internal_assistant(
     _: str = Depends(require_bearer_token),
 ):
     try:
+        collection_error = validate_collection_or_error(request, body.collection_name)
+        if collection_error:
+            return collection_error
         if not body.session_id:
             return error_response(message="Session ID not provided")
         if not body.message:
             return error_response(message="Internal assistant message not provided")
 
         chat_service = request.app.state.chat_service
-        chat_manager = chat_service.get_or_create_chat_manager(body.session_id)
+        chat_manager = chat_service.get_or_create_chat_manager(body.session_id, body.collection_name)
         chat_manager.add_internal_assitant_message(body.message)
         return success_response(
             data={
@@ -621,20 +739,69 @@ async def internal_assistant(
 )
 async def get_log(
     request: Request,
+    collection_name: str = Query(..., description="Collection name"),
     session_id: Optional[str] = Query(None, description="Session ID"),
     _: str = Depends(require_bearer_token),
 ):
     try:
+        collection_error = validate_collection_or_error(request, collection_name)
+        if collection_error:
+            return collection_error
         if not session_id:
             return error_response(message="Session ID not provided")
         chat_service = request.app.state.chat_service
-        chat_manager = chat_service.get_or_create_chat_manager(session_id)
+        chat_manager = chat_service.get_or_create_chat_manager(session_id, collection_name)
         logs = chat_manager.get_runtime_log()
         request.app.state.logger.info("%s", logs)
         return success_response(data=logs)
     except Exception as e:
         request.app.state.logger.error("An error occurred in /api/log endpoint: %s", e)
         return error_response(message=str(e))
+
+
+@app.get(
+    "/api/treerag/tree",
+    tags=["Chat"],
+    summary="Get last TreeRAG tree for a session",
+    response_model=ApiEnvelope,
+)
+async def treerag_tree(
+    request: Request,
+    collection_name: str = Query(..., description="Collection name"),
+    session_id: str = Query(..., description="Session ID"),
+    _: str = Depends(require_bearer_token),
+):
+    collection_error = validate_collection_or_error(request, collection_name)
+    if collection_error:
+        return collection_error
+    tree = request.app.state.tree_rag_service.get_tree(collection_name=collection_name, session_id=session_id)
+    if not tree:
+        return error_response(message="No TreeRAG tree found for this session", status_code=404)
+    return success_response(data=tree)
+
+
+@app.get(
+    "/api/treerag/node",
+    tags=["Chat"],
+    summary="Get details for a TreeRAG node",
+    response_model=ApiEnvelope,
+)
+async def treerag_node(
+    request: Request,
+    collection_name: str = Query(..., description="Collection name"),
+    session_id: str = Query(..., description="Session ID"),
+    node_id: str = Query(..., description="Node ID"),
+    _: str = Depends(require_bearer_token),
+):
+    collection_error = validate_collection_or_error(request, collection_name)
+    if collection_error:
+        return collection_error
+    node = request.app.state.tree_rag_service.get_node(
+        collection_name=collection_name, session_id=session_id, node_id=node_id
+    )
+    if not node:
+        return error_response(message="TreeRAG node not found", status_code=404)
+    return success_response(data=node)
 
 
 @app.post(
@@ -649,13 +816,16 @@ async def report_error(
     _: str = Depends(require_bearer_token),
 ):
     try:
+        collection_error = validate_collection_or_error(request, body.collection_name)
+        if collection_error:
+            return collection_error
         if not body.session_id:
             return error_response(message="Session ID not provided")
         if not body.error_message:
             return error_response(message="Error message not provided")
 
         chat_service = request.app.state.chat_service
-        chat_manager = chat_service.get_or_create_chat_manager(body.session_id)
+        chat_manager = chat_service.get_or_create_chat_manager(body.session_id, body.collection_name)
         logs = chat_manager.get_runtime_log()
 
         error_log_dir = PROJECT_ROOT.parent / "log" / "error"
@@ -692,11 +862,14 @@ async def submit_rating(
     _: str = Depends(require_bearer_token),
 ):
     try:
+        collection_error = validate_collection_or_error(request, body.collection_name)
+        if collection_error:
+            return collection_error
         if not body.session_id or not body.response_id or not body.question or not body.response_content:
             return error_response(message="Missing required fields")
 
         chat_service = request.app.state.chat_service
-        chat_manager = chat_service.get_or_create_chat_manager(body.session_id)
+        chat_manager = chat_service.get_or_create_chat_manager(body.session_id, body.collection_name)
         log = chat_manager.get_runtime_log()
         config = request.app.state.config
 

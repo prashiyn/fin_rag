@@ -3,12 +3,17 @@ import yaml
 import logging
 logger = logging.getLogger(__name__)
 import torch
+import chromadb
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
+from services.bm25_storage import download_bm25_from_s3_if_needed, get_bm25_local_dir
+try:
+    from src.services.doc_processing_llm import DocProcessingEmbeddings
+except ImportError:
+    from services.doc_processing_llm import DocProcessingEmbeddings
 from .ensembleRetriever import EnsembleRetriever
 import GPUtil
 
@@ -16,6 +21,7 @@ class RAGManager:
     """Singleton class for managing RAG collections"""
     _collections: Dict[str, Tuple[Chroma, Chroma]] = {}
     _retrievers: List[EnsembleRetriever] = []
+    _retriever_by_collection: Dict[str, EnsembleRetriever] = {}
 
     _instance = None
     _config = None
@@ -36,30 +42,24 @@ class RAGManager:
         self._config = config
         self.embeddings_model_name = config['embeddings_model_name']
         self.batch_size = 5
-
-        # Suppress warnings from GemmaTokenizerFast regarding __call__ method and logits type as below:
-        # [You're using a GemmaTokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method 
-        # is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding. 
-        # Starting from v4.46, the `logits` model output will have the same type as the model (except at train time, where it
-        #  will always be FP32)]. -- from terminal
-        import transformers
-        transformers.logging.set_verbosity_error()
+        self._collections = {}
+        self._retrievers = []
+        self._retriever_by_collection = {}
 
         try:
-            logger.info("Loading embedding model...")
-            self.embeddings = HuggingFaceEmbeddings(model_name=self.embeddings_model_name)
-            logger.info("Embedding model loaded successfully.")
-            logger.warning("Load Embedding model: Max CUDA memory allocated: {} GB".format(torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024)))
+            logger.info("Initializing doc_processing embedding client...")
+            self.embeddings = DocProcessingEmbeddings.from_config(config)
+            logger.info("Embedding client initialized successfully.")
             
         except Exception as e:
-            logger.error(f"Failed to load embedding model: {e}")
+            logger.error(f"Failed to initialize embedding client: {e}")
 
         if collections is not None:
             for collection, top_k in collections.items():
                 if top_k <= 0:
                     continue
                 self.create_collection(collection)
-                self._retrievers.append(self.create_retriever(top_k, collection, retriever_type="ensemble"))
+                self.upsert_collection_retriever(collection, int(top_k))
 
     def _chroma_kwargs(self, chroma_collection_name: str, subpath: str):
         """Return kwargs for LangChain Chroma: client-server (host/port) or local (persist_directory)."""
@@ -113,12 +113,64 @@ class RAGManager:
         if collection_name not in self._collections:
             raise ValueError(f"Collection {collection_name} does not exist")
             
-        bm25_dir = os.path.join(self._config['persist_directory'], "bm25_index", collection_name)
+        bm25_dir = get_bm25_local_dir(self._config, collection_name)
+        download_bm25_from_s3_if_needed(self._config, collection_name, bm25_dir)
 
         chroma, ts_chroma = self._collections[collection_name]
         retriver = EnsembleRetriever(bm25_dir, chroma, ts_chroma, k, self.embeddings, enable_expand = True)
             
         return retriver
+
+    def has_collection(self, collection_name: str) -> bool:
+        return collection_name in self._collections
+
+    def get_retriever(self, collection_name: str) -> EnsembleRetriever:
+        retriever = self._retriever_by_collection.get(collection_name)
+        if retriever is None:
+            raise ValueError(f"Collection {collection_name} is not initialized")
+        return retriever
+
+    def upsert_collection_retriever(self, collection_name: str, top_k: int) -> None:
+        if top_k <= 0:
+            raise ValueError("top_k must be > 0")
+        if collection_name not in self._collections:
+            self.create_collection(collection_name)
+        retriever = self.create_retriever(top_k, collection_name, retriever_type="ensemble")
+        self._retriever_by_collection[collection_name] = retriever
+        self._retrievers = list(self._retriever_by_collection.values())
+
+    def hydrate_from_chroma(self, default_top_k: int = 10, topk_map: Optional[Dict[str, int]] = None) -> Dict[str, int]:
+        if default_top_k <= 0:
+            raise ValueError("default_top_k must be > 0")
+        discovered = self.discover_collections()
+        resolved: Dict[str, int] = {}
+        for name in discovered:
+            top_k = int((topk_map or {}).get(name, default_top_k))
+            if top_k <= 0:
+                continue
+            self.create_collection(name)
+            self.upsert_collection_retriever(name, top_k)
+            resolved[name] = top_k
+        return resolved
+
+    def discover_collections(self) -> List[str]:
+        """
+        Discover existing main collections from Chroma.
+        - Server mode: list all collections and skip *_ts title-summary collections.
+        - Local mode: list collections from persist_directory/chroma.
+        """
+        host = self._config.get("chroma_server_host")
+        port = int(self._config.get("chroma_server_port", 8000))
+        settings = chromadb.config.Settings(anonymized_telemetry=False, allow_reset=True)
+        if host:
+            client = chromadb.HttpClient(host=host, port=port, settings=settings)
+            names = [c.name for c in client.list_collections()]
+            return sorted([n for n in names if not n.endswith("_ts")])
+
+        persist_dir = os.path.join(self._config["persist_directory"], "chroma")
+        client = chromadb.PersistentClient(path=persist_dir, settings=settings)
+        names = [c.name for c in client.list_collections()]
+        return sorted(names)
 
 
 # Usage example

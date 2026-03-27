@@ -45,6 +45,7 @@ if __name__ == "__main__":
     print("Reranker model: ", config['rerank_model'])
 
     collections = {'lotus': 10}
+    collection_name = "lotus"
     logger.warning("Before loading: Max CUDA memory allocated: {} GB".format(torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024)))
 
     rag_manager = RAGManager(config=config, collections=collections)
@@ -88,9 +89,9 @@ if __name__ == "__main__":
             (answer, rag_context, rag_info, rewritten_question, hypo_chunk_content, 
              all_retrieved_content, qa_history
             ) = chat_service.generate_response_with_rag(
-                question, session_id, internal_input=None, interrupt_index=None)
+                question, session_id, collection_name, internal_input=None, interrupt_index=None)
             
-            chat_manager = chat_service.get_or_create_chat_manager(session_id)
+            chat_manager = chat_service.get_or_create_chat_manager(session_id, collection_name)
 
             simplified_content = []
 
@@ -138,4 +139,4 @@ if __name__ == "__main__":
         print(f"Processed batch {batch_num} to: {results_folder_path}, at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     # keep QA history for the whole test
-    chat_service.api_chat_manager[session_id]['manager'].clear_chat_history()
+    chat_service.get_or_create_chat_manager(session_id, collection_name).clear_chat_history()

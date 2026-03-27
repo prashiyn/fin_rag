@@ -1,0 +1,62 @@
+{
+  "collection": "NIFTY_DEDUP_TEST",
+  "data": {
+    "page_start": 0,
+    "page_end": 10,
+    "page_date_published": "11-01-2023",
+    "chunks": [
+      {
+        "chunk_id": "dedup_chunk_1",
+        "content": "NIFTY closed 1.2% higher with strong participation from financials and IT.",
+        "type": "text",
+        "doc_id": "nifty_dedup_report_a",
+        "page": 1,
+        "bundle_id": "bundle_close_1",
+        "section_title": "Closing Summary",
+        "title_summary": "NIFTY closing summary",
+        "publish_date": "11-01-2023",
+        "prev_chunk": null,
+        "next_chunk": "dedup_chunk_2"
+      },
+      {
+        "chunk_id": "dedup_chunk_2",
+        "content": "NIFTY closed 1.2% higher with strong participation from financials and IT.",
+        "type": "text",
+        "doc_id": "nifty_dedup_report_b",
+        "page": 2,
+        "bundle_id": "bundle_close_2",
+        "section_title": "Duplicate Closing Summary",
+        "title_summary": "NIFTY closing summary duplicate",
+        "publish_date": "10-01-2023",
+        "prev_chunk": "dedup_chunk_1",
+        "next_chunk": "dedup_chunk_3"
+      },
+      {
+        "chunk_id": "dedup_chunk_3",
+        "content": "Top gainers were HDFC Bank and Infosys; top laggard was Hindustan Unilever.",
+        "type": "table",
+        "doc_id": "nifty_dedup_report_b",
+        "page": 3,
+        "bundle_id": "bundle_close_2",
+        "section_title": "Top Movers",
+        "title_summary": "Top gainers and laggards",
+        "publish_date": "11-01-2023",
+        "prev_chunk": "dedup_chunk_2",
+        "next_chunk": null
+      },
+      {
+        "chunk_id": "dedup_chunk_4",
+        "content": "A sector heatmap highlighted buying in banks, autos, and large-cap technology.",
+        "type": "image",
+        "doc_id": "nifty_dedup_report_c",
+        "page": 4,
+        "bundle_id": "bundle_heatmap_1",
+        "section_title": "Heatmap",
+        "title_summary": "Sector heatmap",
+        "publish_date": "11-01-2023",
+        "prev_chunk": null,
+        "next_chunk": null
+      }
+    ]
+  }
+}

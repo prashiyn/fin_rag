@@ -3,12 +3,15 @@ import torch
 logger = logging.getLogger(__name__)
 
 from typing import Dict, List, Optional, Set, Union, Any
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from src.utils.profiler import profiler
 import time
+try:
+    from src.services.doc_processing_llm import DocProcessingEmbeddings
+except ImportError:
+    from services.doc_processing_llm import DocProcessingEmbeddings
 
 from src.utils.bm25Retriever import BM25Retriever
 from src.utils.faissRetriever import FaissRetriever
@@ -20,7 +23,7 @@ class EnsembleRetriever:
                  chroma: Chroma,
                  ts_chroma: Chroma,
                  k: int,
-                 embeddings: HuggingFaceEmbeddings,
+                 embeddings: Any,
                  faiss_k: int = None,
                  bm25_k: int = None,
                  faiss_ts_k: int = None,
@@ -288,8 +291,7 @@ if __name__ == "__main__":
         config = yaml.safe_load(file)
 
     collection_name = "lotus"
-    embeddings_model_name = config['embeddings_model_name']
-    embeddings = HuggingFaceEmbeddings(model_name=embeddings_model_name)
+    embeddings = DocProcessingEmbeddings.from_config(config)
 
     from langchain_chroma import Chroma
     host = config.get("chroma_server_host")

@@ -47,6 +47,7 @@ if __name__ == "__main__":
         config = yaml.safe_load(file)
     
     collections = {'lotus': 10, 'lotus_car_stats': 0, 'lotus_brand_info': 0}
+    collection_name = "lotus"
     rag_manager = RAGManager(config=config, collections=collections)
     log_gpu_usage('Documnets retrievers loaded.')
     chat_service = ChatService(config=config, rag_manager=rag_manager)
@@ -100,9 +101,10 @@ if __name__ == "__main__":
                 file.write(f'******* Question {idx} *******\n')
                 file.write(f'---Question---\n{question}\n\n')
                 
-                answer, rag_context, rag_info, rewritten_question = chat_service.generate_response_with_rag(question, session_id, internal_input=None, interrupt_index=None)
+                answer, rag_context, rag_info, rewritten_question, _, _, _ = chat_service.generate_response_with_rag(question, session_id, collection_name, internal_input=None, interrupt_index=None)
 
-                history_summary, complete_input, need_rag = chat_service.get_test_info(session_id)
+                history_summary, need_rag = chat_service.get_test_info(session_id, collection_name)
+                history_summary = history_summary or ""
 
                 if show_rewritten_question:
                     file.write(f'---Rewritten Question---\n{rewritten_question}\n\n')
@@ -129,7 +131,7 @@ if __name__ == "__main__":
 
                 if judge_answer:
                     # Compare the generated answer with the expected answer
-                    judge_score, reason = chat_service.api_chat_manager[session_id].evaluate(answer, expected_answer)
+                    judge_score, reason = chat_service.get_or_create_chat_manager(session_id, collection_name).evaluate(answer, expected_answer)
                     sum_score += judge_score
 
                     file.write(f'---Expected Answer---\n')
@@ -141,8 +143,8 @@ if __name__ == "__main__":
                     write_wrapped_text(file, reason)
                     file.write('\n')
 
-                chat_service.generate_chat_summary(session_id)
-            chat_service.api_chat_manager[session_id].clear_chat_history()
+                chat_service.generate_chat_summary(session_id, collection_name)
+            chat_service.get_or_create_chat_manager(session_id, collection_name).clear_chat_history()
 
     if judge_answer:
         # Calculate and print the accuracy score

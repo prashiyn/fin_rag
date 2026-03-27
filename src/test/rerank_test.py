@@ -1,4 +1,13 @@
-from sentence_transformers import SentenceTransformer
+import os
+import yaml
+import numpy as np
+from pathlib import Path
+from dotenv import load_dotenv
+
+try:
+    from src.services.doc_processing_llm import DocProcessingEmbeddings
+except ImportError:
+    from services.doc_processing_llm import DocProcessingEmbeddings
 
 # This model supports two prompts: "s2p_query" and "s2s_query" for sentence-to-passage and sentence-to-sentence tasks, respectively.
 # They are defined in `config_sentence_transformers.json`
@@ -13,22 +22,24 @@ docs = [
     "Green tea has been consumed for centuries and is known for its potential health benefits. It contains antioxidants that may help protect the body against damage caused by free radicals. Regular consumption of green tea has been associated with improved heart health, enhanced cognitive function, and a reduced risk of certain types of cancer. The polyphenols in green tea may also have anti-inflammatory and weight loss properties.",
 ]
 
-# ！The default dimension is 1024, if you need other dimensions, please clone the model and modify `modules.json` to replace `2_Dense_1024` with another dimension, e.g. `2_Dense_256` or `2_Dense_8192` !
-# on gpu
-model = SentenceTransformer("dunzhang/stella_en_400M_v5", trust_remote_code=True).cuda()
-# you can also use this model without the features of `use_memory_efficient_attention` and `unpad_inputs`. It can be worked in CPU.
-# model = SentenceTransformer(
-#     "dunzhang/stella_en_400M_v5",
-#     trust_remote_code=True,
-#     device="cpu",
-#     config_kwargs={"use_memory_efficient_attention": False, "unpad_inputs": False}
-# )
-query_embeddings = model.encode(queries, prompt_name=query_prompt_name)
-doc_embeddings = model.encode(docs)
-print(query_embeddings.shape, doc_embeddings.shape)
-# (2, 1024) (2, 1024)
+root = Path(__file__).resolve().parents[2]
+load_dotenv(root / ".env")
+config_path = os.getenv("CONFIG_PATH", str(root / "config" / "production.yaml"))
+with open(config_path, "r", encoding="utf-8") as f:
+    cfg = yaml.safe_load(f) or {}
+llm_path = Path(config_path).parent / "llm.yaml"
+if llm_path.exists():
+    with open(llm_path, "r", encoding="utf-8") as f:
+        llm_cfg = yaml.safe_load(f) or {}
+    for k, v in llm_cfg.items():
+        cfg.setdefault(k, v)
 
-similarities = model.similarity(query_embeddings, doc_embeddings)
+emb = DocProcessingEmbeddings.from_config(cfg)
+query_embeddings = np.array(emb.embed_documents(queries), dtype=np.float32)
+doc_embeddings = np.array(emb.embed_documents(docs), dtype=np.float32)
+print(query_embeddings.shape, doc_embeddings.shape)
+
+q_norm = query_embeddings / np.linalg.norm(query_embeddings, axis=1, keepdims=True)
+d_norm = doc_embeddings / np.linalg.norm(doc_embeddings, axis=1, keepdims=True)
+similarities = np.matmul(q_norm, d_norm.T)
 print(similarities)
-# tensor([[0.8398, 0.2990],
-#         [0.3282, 0.8095]])

@@ -1,0 +1,49 @@
+{
+  "collection": "NIFTY",
+  "data": {
+    "page_start": 0,
+    "page_end": 10,
+    "page_date_published": "10-01-2023",
+    "chunks": [
+      {
+        "chunk_id": "nifty_doc1_chunk_1",
+        "content": "NIFTY index opened higher with broad-based gains across banking and IT sectors.",
+        "type": "text",
+        "doc_id": "nifty_daily_report_2023_10_01",
+        "page": 1,
+        "bundle_id": "bundle_market_open",
+        "section_title": "Market Open",
+        "title_summary": "NIFTY market open commentary",
+        "publish_date": "10-01-2023",
+        "prev_chunk": null,
+        "next_chunk": "nifty_doc1_chunk_2"
+      },
+      {
+        "chunk_id": "nifty_doc1_chunk_2",
+        "content": "Top contributors to index gains were HDFC Bank, Infosys, and Reliance Industries.",
+        "type": "table",
+        "doc_id": "nifty_daily_report_2023_10_01",
+        "page": 2,
+        "bundle_id": "bundle_market_open",
+        "section_title": "Contributors",
+        "title_summary": "Top gain contributors",
+        "publish_date": "10-01-2023",
+        "prev_chunk": "nifty_doc1_chunk_1",
+        "next_chunk": "nifty_doc1_chunk_3"
+      },
+      {
+        "chunk_id": "nifty_doc1_chunk_3",
+        "content": "A heatmap image indicates strong momentum in large-cap financials and selective auto names.",
+        "type": "image",
+        "doc_id": "nifty_daily_report_2023_10_01",
+        "page": 3,
+        "bundle_id": "bundle_heatmap",
+        "section_title": "Heatmap",
+        "title_summary": "Sector momentum heatmap",
+        "publish_date": "10-01-2023",
+        "prev_chunk": "nifty_doc1_chunk_2",
+        "next_chunk": null
+      }
+    ]
+  }
+}

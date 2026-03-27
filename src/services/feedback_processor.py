@@ -9,10 +9,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI
-
 from database import get_session
 from models import Feedback, FeedbackQuestionAlias, FrequentQAPair
+try:
+    from src.services.doc_processing_llm import DocProcessingLLMClient
+except ImportError:
+    from services.doc_processing_llm import DocProcessingLLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +49,15 @@ def save_last_processed_id(file_path: str | Path, last_id: int) -> None:
     path.write_text(str(last_id), encoding="utf-8")
 
 
-def _get_classifier_client(config: dict) -> OpenAI | None:
-    """Build OpenAI client for classifier LLM if config has feedback_classifier_* keys."""
-    base_url = config.get("feedback_classifier_base_url")
-    api_key = config.get("feedback_classifier_api_key")
-    if not base_url or not api_key:
+def _get_classifier_client(config: dict) -> DocProcessingLLMClient | None:
+    """Build centralized llm client for classifier model."""
+    if not config.get("doc_processing_base_url"):
         return None
-    return OpenAI(api_key=api_key, base_url=base_url)
+    try:
+        return DocProcessingLLMClient.from_config(config, provider_key="feedback_classifier_provider")
+    except Exception as e:
+        logger.warning("Failed to build classifier client: %s", e)
+        return None
 
 
 def classify_question(
@@ -61,7 +65,7 @@ def classify_question(
     is_rag: int,
     categories: list[str],
     category_descriptions: dict[str, str],
-    client: OpenAI | None,
+    client: DocProcessingLLMClient | None,
     model: str,
     retries: int = 3,
 ) -> str:
@@ -82,16 +86,14 @@ Question: {question}
 Return ONLY the category name without any explanation or additional text. For example, if the question is about headquarters, just return "Company_Basics_Governance". Do not include numbers, punctuation, or anything else."""
     for attempt in range(retries):
         try:
-            response = client.chat.completions.create(
+            response = client.complete(
                 model=model,
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant that classifies questions into predefined categories."},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.3,
-                max_tokens=50,
             )
-            category = response.choices[0].message.content.strip()
+            category = str(response.get("content", "")).strip()
             if category in categories:
                 return category
             for valid in categories:
@@ -124,7 +126,7 @@ def calculate_jaccard_similarity(text1: str, text2: str) -> tuple[bool, float]:
 def is_semantic_match(
     question1: str,
     question2: str,
-    client: OpenAI | None,
+    client: DocProcessingLLMClient | None,
     model: str,
 ) -> tuple[bool, float]:
     """Use LLM to decide if two questions are semantically equivalent. Fallback to Jaccard if no client or model."""
@@ -143,16 +145,14 @@ Question 2: {question2}
 Reply with ONLY one word: either "yes" (they are semantically equivalent) or "no" (they are different questions)."""
     for attempt in range(2):
         try:
-            response = client.chat.completions.create(
+            response = client.complete(
                 model=model,
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant that determines if questions are asking for the same information."},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.1,
-                max_tokens=10,
             )
-            result = response.choices[0].message.content.strip().lower()
+            result = str(response.get("content", "")).strip().lower()
             if "yes" in result:
                 return True, 0.9
             if "no" in result:
@@ -164,7 +164,7 @@ Reply with ONLY one word: either "yes" (they are semantically equivalent) or "no
 
 def find_matching_qa_id(
     question: str,
-    classifier_client: OpenAI | None,
+    classifier_client: DocProcessingLLMClient | None,
     model: str,
 ) -> tuple[int | None, float]:
     """Find best matching frequent_qa_pairs id for the question. Uses session from get_session; call within session context or pass session."""

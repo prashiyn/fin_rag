@@ -75,10 +75,10 @@ class ChatService:
 
     def __init__(self, config, rag_manager: RAGManager, rerank_topk: int, session_timeout: int = 1800):
         self.api_chat_manager: Dict[str, ChatManager] = {}
+        self.config = config
         self.rag_manager: RAGManager = rag_manager
-        self.base_url: str = config.get('llm_base_url')
-        self.model_name: str = config.get('llm_model_name')
-        self.api_key: str = config.get('llm_api_key')
+        # Model selection still lives here; actual LLM transport is centralized in doc_processing_llm.
+        self.model_name: str = config.get("chat_llm_model_name") or config.get("llm_model_name")
         self.rerank_topk = rerank_topk
         self.session_timeout = session_timeout
         # Lock to access the api_chat_manager dict
@@ -92,6 +92,7 @@ class ChatService:
         self.qa_table_directory = config.get("qa_table_directory")
         self.question_similarity_finder = QuestionSimilarityFinder(database_url=config.get("database_url"))
         self.qa_loader = QAChromaLoader(
+            config=config,
             persist_directory=config.get("qa_table_persist_directory"),
             collection_name="lotus_qa",
             embeddings_model_name=config.get("embeddings_model_name"),
@@ -102,10 +103,13 @@ class ChatService:
 
         logger.warning("Load Reranker: Max CUDA memory allocated: {} GB".format(torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024)))
 
-        if not self.model_name or not self.base_url:
-            logging.error("LLM model name/base_url is not configured.")
+        if not self.model_name:
+            logging.error("LLM model name is not configured.")
             sys.exit(1)
-        logging.info(f"Using model: {self.model_name}, URL: {self.base_url}")
+        if not self.config.get("doc_processing_base_url"):
+            logging.error("doc_processing_base_url is not configured.")
+            sys.exit(1)
+        logging.info(f"Using model: {self.model_name}")
 
     def __del__(self):
         """
@@ -139,20 +143,24 @@ class ChatService:
                 del self.api_chat_manager[session_id]
                 logger.info(f"Removed expired session {session_id}")
 
-    def get_or_create_chat_manager(self, session_id: str) -> ChatManager:
+    def _chat_key(self, collection_name: str, session_id: str) -> str:
+        return f"{collection_name}::{session_id}"
+
+    def get_or_create_chat_manager(self, session_id: str, collection_name: str) -> ChatManager:
+        key = self._chat_key(collection_name, session_id)
         with self.api_chat_manager_lock:
-            if session_id not in self.api_chat_manager:
-                chat_manager = ChatManager(session_id, self.base_url, self.api_key, self.model_name, 
+            if key not in self.api_chat_manager:
+                chat_manager = ChatManager(session_id, self.config, self.model_name,
                                         self.reranker, chunk_topk=self.rerank_topk, reranker_lock=self.reranker_lock)
-                self.api_chat_manager[session_id] = {
+                self.api_chat_manager[key] = {
                     'manager': chat_manager,
                     'timestamp': datetime.now()
                 }
             else:
                 # Update timestamp on access
-                self.api_chat_manager[session_id]['timestamp'] = datetime.now()
+                self.api_chat_manager[key]['timestamp'] = datetime.now()
             
-        return self.api_chat_manager[session_id]['manager']
+        return self.api_chat_manager[key]['manager']
 
     def get_similar_questions_db(self, question: str, top_n: int = 5, threshold: float = 0.55, 
                               bm25_threshold: float = 3.0) -> tuple[bool, list[dict]]:
@@ -254,8 +262,8 @@ class ChatService:
             return False, []        
 
     
-    def generate_response_with_rag(self, question: str, session_id: str, internal_input=None, interrupt_index=None):
-        chat_manager = self.get_or_create_chat_manager(session_id)
+    def generate_response_with_rag(self, question: str, session_id: str, collection_name: str, internal_input=None, interrupt_index=None):
+        chat_manager = self.get_or_create_chat_manager(session_id, collection_name)
         lang = '中文' if bool(re.search(r'[\u4e00-\u9fff]', question)) else 'English'
         user_input = question
         qa_history = chat_manager.get_qa_history()
@@ -281,21 +289,19 @@ class ChatService:
                 # log_gpu_usage('rag started')
                 timeinfo_list = []
                 
-                for retriever in self.rag_manager._retrievers:
-                    hypo_chunks = chat_manager.generate_hypo_chunks(rewritten_question)
-                    # hypo_chunks = []
-                    hypo_chunks_list.append(hypo_chunks)
+                retriever = self.rag_manager.get_retriever(collection_name)
+                hypo_chunks = chat_manager.generate_hypo_chunks(rewritten_question)
+                hypo_chunks_list.append(hypo_chunks)
 
-                    retriever_content = retriever.invoke(user_input, hypo_chunks)
-                    all_retrieved_content.append(retriever_content)
-                    rerank_start_time = time.perf_counter()
-                    current_context, timeinfo_list = get_rag_content(chat_manager, retriever_content, rewritten_question, chat_manager.query_time, retriever)
-                    rerank_end_time = time.perf_counter()
-                    logger.info(f"Reranking sub-question {rewritten_question}")
-                    logger.info("The time for rerank: {:.2f}".format(rerank_end_time-rerank_start_time))
-                    # log_gpu_usage('rag finished')
-                    rag_context += current_context + '\n'
-                    logger.info(f'Input Rag Context is: \n {rag_context}')
+                retriever_content = retriever.invoke(user_input, hypo_chunks)
+                all_retrieved_content.append(retriever_content)
+                rerank_start_time = time.perf_counter()
+                current_context, timeinfo_list = get_rag_content(chat_manager, retriever_content, rewritten_question, chat_manager.query_time, retriever)
+                rerank_end_time = time.perf_counter()
+                logger.info(f"Reranking sub-question {rewritten_question}")
+                logger.info("The time for rerank: {:.2f}".format(rerank_end_time-rerank_start_time))
+                rag_context += current_context + '\n'
+                logger.info(f'Input Rag Context is: \n {rag_context}')
 
                 # time of chunks in metadata['date_published']
                 used_time = select_most_recent_time(timeinfo_list)
@@ -342,8 +348,8 @@ class ChatService:
         
         return answer, rag_context, chat_manager.rag_info, rewritten, chat_manager.hypo_chunks, all_retrieved_content, chat_manager.get_qa_history()
 
-    def generate_response_async(self, question: str, session_id: str, internal_input: str = None, interrupt_index: int = None, using_qa_pairs: bool = True):
-        chat_manager = self.get_or_create_chat_manager(session_id)
+    def generate_response_async(self, question: str, session_id: str, collection_name: str, internal_input: str = None, interrupt_index: int = None, using_qa_pairs: bool = True):
+        chat_manager = self.get_or_create_chat_manager(session_id, collection_name)
         lang = '中文' if bool(re.search(r'[\u4e00-\u9fff]', question)) else 'English'
         qa_history = chat_manager.get_qa_history()
         rewrite_start_time = time.perf_counter()
@@ -408,7 +414,7 @@ class ChatService:
                 if chat_manager.need_rag:
                     hypo_chunks_list.append(hypo_chunks)
 
-                    retriever = self.rag_manager._retrievers[0]
+                    retriever = self.rag_manager.get_retriever(collection_name)
 
                     retriever_content = retriever.invoke(rewritten, hypo_chunks)
                     all_retrieved_content.append(retriever_content)
@@ -459,10 +465,10 @@ class ChatService:
         
         return final_answer, "", chat_manager.rag_info, rewrittens, chat_manager.hypo_chunks, all_retrieved_content, qa_history
 
-    def generate_response_async_stream(self, question: str, session_id: str, internal_input: str = None, interrupt_index: int = None):
+    def generate_response_async_stream(self, question: str, session_id: str, collection_name: str, internal_input: str = None, interrupt_index: int = None):
         profiler.start("answer_stream")
         
-        chat_manager = self.get_or_create_chat_manager(session_id)
+        chat_manager = self.get_or_create_chat_manager(session_id, collection_name)
         lang = '中文' if bool(re.search(r'[\u4e00-\u9fff]', question)) else 'English'
         qa_history = chat_manager.get_qa_history()
         rewrittens = chat_manager.if_query_rag(question, qa_history)
@@ -521,7 +527,7 @@ class ChatService:
                 rag_docu_time = None
 
                 if chat_manager.need_rag:
-                    retriever = self.rag_manager._retrievers[0]
+                    retriever = self.rag_manager.get_retriever(collection_name)
                     retriever_content = retriever.invoke(rewritten, hypo_chunks)
                     all_retrieved_content.append(retriever_content)
 
@@ -583,11 +589,11 @@ class ChatService:
         # summary_thread.daemon = True  # do not block application shutdown
         # summary_thread.start()
         
-    def generate_chat_summary(self, session_id: str):
+    def generate_chat_summary(self, session_id: str, collection_name: str):
         '''
             Generate chat summary for a ChatManager given session_id
         '''
-        chat_manager = self.get_or_create_chat_manager(session_id)
+        chat_manager = self.get_or_create_chat_manager(session_id, collection_name)
         try:
             # Set the summarizing flag to true and clear the event
             with chat_manager.summary_lock:
@@ -612,9 +618,9 @@ class ChatService:
                 chat_manager.summary_event.set()
             logging.error(f"An error occurred while generating summary: {str(e)}")
 
-    def get_test_info(self, session_id: str):
+    def get_test_info(self, session_id: str, collection_name: str):
         # use this function only in the testing scripts [qa_e2e_*.py], otherwise it will slow down the process
-        chat_manager = self.get_or_create_chat_manager(session_id)
+        chat_manager = self.get_or_create_chat_manager(session_id, collection_name)
         if chat_manager.is_summarizing:
             logger.info(f"Waiting for summary generation to complete for session {session_id}, should ONLY be invoked from testing scripts")
             chat_manager.summary_event.wait(timeout=10)

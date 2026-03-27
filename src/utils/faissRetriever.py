@@ -2,13 +2,16 @@ import logging
 logger = logging.getLogger(__name__)
 import faiss
 import numpy as np
-from langchain_huggingface import HuggingFaceEmbeddings
 from typing import List, Dict, Any, Optional
+try:
+    from src.services.doc_processing_llm import DocProcessingEmbeddings
+except ImportError:
+    from services.doc_processing_llm import DocProcessingEmbeddings
 
 class FaissRetriever:
     """Faiss retriever compatible with LangChain that supports metadata filtering."""
     
-    def __init__(self, embeddings, embedding_fn: HuggingFaceEmbeddings):
+    def __init__(self, embeddings, embedding_fn: Any):
         super().__init__()
         self.embeddings = embedding_fn
         embeddings = np.array(embeddings)
@@ -44,8 +47,7 @@ if __name__ == "__main__":
     with open(config_path, "r") as file:
         config = yaml.safe_load(file)
 
-    embeddings_model_name = config["embeddings_model_name"]
-    embeddings = HuggingFaceEmbeddings(model_name=embeddings_model_name)
+    embeddings = DocProcessingEmbeddings.from_config(config)
 
     from langchain_chroma import Chroma
     host = config.get("chroma_server_host")

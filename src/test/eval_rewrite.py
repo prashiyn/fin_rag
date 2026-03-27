@@ -33,6 +33,7 @@ if __name__ == "__main__":
         config = yaml.safe_load(file)
     
     collections = {'lotus': 10, 'lotus_car_stats': 0, 'lotus_brand_info': 0}
+    collection_name = "lotus"
     rag_manager = RAGManager(config=config, collections=collections)
     log_gpu_usage('Documnets retrievers loaded.')
     chat_service = ChatService(config=config, rag_manager=rag_manager)
@@ -71,7 +72,7 @@ if __name__ == "__main__":
             file.write("="*80 + "\n\n")  # 分隔线
             
             session_id = time.time()
-            chat_manager = chat_service.get_or_create_chat_manager(session_id)
+            chat_manager = chat_service.get_or_create_chat_manager(session_id, collection_name)
 
             question, expected_answer = item['question'], item['answer']
 
@@ -85,7 +86,7 @@ if __name__ == "__main__":
             if enable_hyde:
                 hyde_chunks = chat_manager.generate_hypo_chunks(rewritten_question)
 
-            chunks = rag_manager._retrievers[0].invoke(rewritten_question, hyde_chunks)
+            chunks = rag_manager.get_retriever(collection_name).invoke(rewritten_question, hyde_chunks)
 
             file.write(f'---Chunks---\n')
             for chunk in chunks:

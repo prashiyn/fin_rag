@@ -6,18 +6,19 @@ import time
 import yaml
 import logging
 import json
-from openai import OpenAI
 from pathlib import Path
 import csv
 import shutil
 import uuid
 import requests
 import re
+from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from utils.vllmChatService import ChatService
 from utils.ragManager import RAGManager
+from services.doc_processing_llm import DocProcessingLLMClient
 
 # -------------csv_path-----------------
 csv_path = "/root/autodl-tmp/dir_tzh/lotus_dataset/filled.csv"
@@ -44,13 +45,34 @@ if csv_path != output_csv:
 # print(period_columns)
 
 
-MODEL_NAME = "deepseek-v3"
-api_key = "sk-BUYcNLayB5w9rHwa1gYodJq3bgbJX6ChWNeRBNe1I6CgX4zr"
+def _load_config() -> dict:
+    root = Path(__file__).resolve().parents[2]
+    load_dotenv(root / ".env")
+    config_path = os.getenv("CONFIG_PATH", str(root / "config" / "production.yaml"))
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+    llm_path = Path(config_path).parent / "llm.yaml"
+    if llm_path.exists():
+        with open(llm_path, "r", encoding="utf-8") as f:
+            llm = yaml.safe_load(f) or {}
+        for k, v in llm.items():
+            config.setdefault(k, v)
+    test_llm_path = Path(config_path).parent / "test_llm.yaml"
+    if test_llm_path.exists():
+        with open(test_llm_path, "r", encoding="utf-8") as f:
+            test_llm = yaml.safe_load(f) or {}
+        for k, v in test_llm.items():
+            config.setdefault(k, v)
+    if config.get("test_llm_api_key") is None:
+        env_val = os.getenv("TEST_LLM_API_KEY")
+        if env_val:
+            config["test_llm_api_key"] = env_val
+    return config
 
-client = OpenAI(
-    api_key=api_key,
-    base_url='https://api.lkeap.cloud.tencent.com/v1',
-)
+
+_cfg = _load_config()
+MODEL_NAME = _cfg["test_llm_model_name"]
+client = DocProcessingLLMClient.from_config(_cfg)
 
 
 def generate_question(period_code,topic, max_retry=2):
@@ -86,15 +108,14 @@ def generate_question(period_code,topic, max_retry=2):
     for _ in range(max_retry):
 
         try:
-            completion = client.chat.completions.create(
+            completion = client.complete(
                 model=MODEL_NAME,
                 messages=[
                     {"role": "system", "content": "你是一位针对路特斯公司的中文问题生成器"},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0
             )
-            question = completion.choices[0].message.content.strip()
+            question = str(completion.get("content", "")).strip()
             break
         except Exception as e:
             print(f"API调用错误: {str(e)}")
@@ -115,6 +136,7 @@ torch.cuda.reset_peak_memory_stats()
 logger = logging.getLogger(__name__)
 
 collections = {'lotus': 15}
+collection_name = "lotus"
 rag_manager = RAGManager(config=config, collections=collections)
 chat_service = ChatService(config=config, rag_manager=rag_manager, rerank_topk=config['rerank_topk'])
 
@@ -124,11 +146,12 @@ def rag_answer(question):
     answer, rag_context, rag_info, rewritten_question, hypo_chunk_content, all_retrieved_content, history = chat_service.generate_response_async(
         question,
         session_id,
+        collection_name,
         internal_input=None,
         interrupt_index=None,
         using_qa_pairs=False
     )
-    chat_service.api_chat_manager[session_id]['manager'].clear_chat_history()
+    chat_service.get_or_create_chat_manager(session_id, collection_name).clear_chat_history()
     return answer, rag_context, rag_info, rewritten_question, all_retrieved_content, history
 
 # 判断答案 并简化答案为一个数字
@@ -180,15 +203,14 @@ def judge_answer(question,answer,max_retry=2):
     
     for _ in range(max_retry):
         try:
-            completion = client.chat.completions.create(
+            completion = client.complete(
                 model=MODEL_NAME,
                 messages=[
                     {"role": "system", "content": "你是一名数据提炼助手。"},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0
             )
-            response_lines = completion.choices[0].message.content.strip().split("\n")
+            response_lines = str(completion.get("content", "")).strip().split("\n")
             success_str = response_lines[0].strip()
             success = success_str.lower() == 'true'      # True 或 False (bool)
             answer = response_lines[1].strip()
