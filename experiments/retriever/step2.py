@@ -36,7 +36,6 @@ Output
     ]
 '''
 
-import yaml
 import os
 import json
 import logging
@@ -45,7 +44,8 @@ import sys
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
+from src.services.doc_processing_llm import DocProcessingEmbeddings
+from src.config import get_config
 
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(project_root)
@@ -180,13 +180,11 @@ def main():
         sys.exit(1)
 
     # Load configuration
-    config_path = os.getenv('CONFIG_PATH', os.path.join(project_root, 'config', 'production.yaml'))
-    with open(config_path, 'r') as file:
-        config = yaml.safe_load(file)
+    config = get_config()
 
     # Initialize retriever
     collection_name = "lotus"
-    embeddings = HuggingFaceEmbeddings(model_name=config["embeddings_model_name"])
+    embeddings = DocProcessingEmbeddings.from_config(config)
     host = config.get("chroma_server_host")
     port = int(config.get("chroma_server_port", 8000))
 

@@ -4,7 +4,6 @@ import logging
 logging.basicConfig(filename='load_data.log', filemode='w', level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-import yaml
 import json
 from tqdm import tqdm
 import shutil
@@ -15,10 +14,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.utils.ragManager import RAGManager
 from src.utils.bm25Retriever import load_from_chroma_and_save
+from src.config import get_config
 
 def load_config(config_path):
-    with open(config_path, 'r') as file:
-        return yaml.safe_load(file)
+    return get_config()
 
 def import_collection_from_dir(rag_manager, collection_name: str, dir_path: str, batch_size: int, ignore_range: bool = False):
         """Load data from a directory into a chroma collection, processing metadata and content.
@@ -130,8 +129,7 @@ def import_collection_from_dir(rag_manager, collection_name: str, dir_path: str,
         logger.info(f"Database stored successfully in {collection_name} collection.")
 
 if __name__ == '__main__':
-    config_path = "../config/production.yaml"
-    config = load_config(config_path)
+    config = load_config("")
 
     # With Chroma client-server, data lives on the server; only clear local file storage when using local Chroma
     if not config.get("chroma_server_host") and os.path.exists(config["persist_directory"]):

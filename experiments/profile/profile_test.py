@@ -1,7 +1,6 @@
 import sys
 import os
 import time
-import yaml
 import logging
 import json
 import glob
@@ -12,11 +11,12 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from utils.vllmChatService import ChatService
-from utils.ragManager import RAGManager
-from utils.profiler import profiler
+from src.utils.vllmChatService import ChatService
+from src.utils.ragManager import RAGManager
+from src.utils.profiler import profiler
+from src.config import get_config
 
 def read_questions_from_md(md_file_path):
     questions = []
@@ -56,9 +56,7 @@ def load_questions_file(file_path):
 
 if __name__ == "__main__":
     
-    config_path = os.getenv('CONFIG_PATH', '../../config/production.yaml')
-    with open(config_path, 'r') as file:
-        config = yaml.safe_load(file)
+    config = get_config()
     
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()

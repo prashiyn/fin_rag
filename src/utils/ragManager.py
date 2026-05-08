@@ -1,5 +1,4 @@
 import os
-import yaml
 import logging
 logger = logging.getLogger(__name__)
 import torch
@@ -47,7 +46,7 @@ class RAGManager:
         self._retriever_by_collection = {}
 
         try:
-            logger.info("Initializing doc_processing embedding client...")
+            logger.info("Initializing LLM service embedding client...")
             self.embeddings = DocProcessingEmbeddings.from_config(config)
             logger.info("Embedding client initialized successfully.")
             
@@ -175,9 +174,8 @@ class RAGManager:
 
 # Usage example
 def main():
-    config_path = "../../config/config_test.yaml"
-    with open(config_path, 'r') as file:
-        config = yaml.safe_load(file)
+    from config import get_config
+    config = get_config()
     
     questions = [
         "Are there any new releases in 2023?",

@@ -17,16 +17,23 @@ _engine = None
 _SessionLocal: sessionmaker[Session] | None = None
 
 
-def init_db(database_url: str) -> None:
+def init_db(
+    database_url: str,
+    *,
+    pool_size: int = 5,
+    max_overflow: int = 10,
+) -> None:
     """Create engine and session factory. Call once at app startup (e.g. from config)."""
     global _engine, _SessionLocal
     if _engine is not None:
         return
+    pool_size = max(1, int(pool_size))
+    max_overflow = max(0, int(max_overflow))
     _engine = create_engine(
         database_url,
         pool_pre_ping=True,
-        pool_size=5,
-        max_overflow=10,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
     )
     _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
     logger.info("Database engine and session factory initialized")

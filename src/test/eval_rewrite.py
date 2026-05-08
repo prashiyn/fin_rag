@@ -1,7 +1,6 @@
 import sys
 import os
 import time
-import yaml
 import logging
 import json
 from tqdm import tqdm
@@ -17,6 +16,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from utils.vllmChatService import ChatService
 from utils.ragManager import RAGManager
 from gpu_log import log_gpu_usage
+from config import get_config
 
 def write_wrapped_text(file, text, max_line_length=80):
     while text:
@@ -28,9 +28,7 @@ if __name__ == "__main__":
 
     log_gpu_usage("Test Start")
     
-    config_path = os.getenv('CONFIG_PATH', '../../config/config_vllm.yaml')
-    with open(config_path, 'r') as file:
-        config = yaml.safe_load(file)
+    config = get_config()
     
     collections = {'lotus': 10, 'lotus_car_stats': 0, 'lotus_brand_info': 0}
     collection_name = "lotus"

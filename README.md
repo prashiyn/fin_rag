@@ -69,7 +69,7 @@ graph TD
   D2[FAISS]
   D3[Chroma Title Summary]
   E[Reranker: HF FlagEmbedding]
-  F[LLM APIs: doc_processing /llm/complete + /llm/embeddings]
+  F[LLM APIs: llm-service /llm/complete + /llm/embeddings]
   G[PostgreSQL: feedback, frequent_qa, qa_table]
   H[Persist: bm25_index]
   I[Persist: chroma]
@@ -92,10 +92,10 @@ graph TD
 ## Usage
 
 - Quick Start
-  1. Prepare the configuration: Copy `config/example.yaml` to `config/production.yaml` (or set `CONFIG_PATH`), and set `chroma_server_host` / `chroma_server_port` for [Chroma client-server mode](https://docs.trychroma.com/guides/deploy/client-server-mode), and `database_url` for PostgreSQL (feedback, frequent QA, qa_table).
+  1. Prepare configuration in `.env` (copy from `.env.example`) and set `CHROMA_SERVER_HOST` / `CHROMA_SERVER_PORT`, Postgres (`POSTGRES_HOST`, …, `POSTGRES_DATABASE`; optional `POSTGRES_MAX_CONNECTIONS`), `LLM_SERVICE_BASE_URL`, and `BEARER_TOKEN`. You may set `DATABASE_URL` instead to use a single connection string.
   2. Ensure PostgreSQL is running and the database exists, then apply migrations from the project root: `alembic upgrade head`. (See [PostgreSQL and Alembic](#postgresql-and-alembic) below.)
   3. Start the Chroma server (when using client-server): `chroma run --path /path/to/chroma_data` (default port 8000).
-  4. Start the doc-processing service and ensure `POST /llm/complete` and `POST /llm/embeddings` are available. Configure `doc_processing_base_url`, `doc_processing_provider`, `llm_model_name`, and `embeddings_model_name`.
+  4. Start the LLM service and ensure `POST /llm/complete` and `POST /llm/embeddings` are available. Configure `llm_service_base_url`, `llm_service_provider`, `llm_model_name`, and `embeddings_model_name`.
   5. Start the API service (requires [uv](https://docs.astral.sh/uv/) and dependencies: `uv sync` from project root).
 
    **From the `src` directory** (recommended):
@@ -121,15 +121,15 @@ graph TD
 
 ## Configuration
 
-By default, the service loads configuration from the path in the `CONFIG_PATH` environment variable; if unset, it uses `config/production.yaml` relative to the project root.
+The service uses `.env` as the single configuration source (loaded by `src/config.py`).
 
 <details>
 <summary>Example (Key Fields)</summary>
 
 
 ```yaml
-# PostgreSQL (feedback, frequent_qa_pairs, qa_table). Run: alembic upgrade head
-database_url: "postgresql://postgres:postgres@localhost:5432/fin_rag"
+# PostgreSQL (feedback, frequent_qa_pairs, qa_table). Composed from POSTGRES_* or DATABASE_URL — run: alembic upgrade head
+# POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DATABASE, POSTGRES_MAX_CONNECTIONS (pool size)
 
 # Chroma client-server mode (recommended). Start Chroma with: chroma run --path /path/to/chroma_data
 chroma_server_host: "localhost"
@@ -141,9 +141,9 @@ persist_directory: "/path/to/database_root"
 embeddings_model_name: "BAAI/bge-m3"
 
 llm_model_name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
-doc_processing_base_url: "http://127.0.0.1:8001" # doc_processing service base URL
-doc_processing_provider: "openai" # provider alias expected by doc_processing /llm/complete
-doc_processing_embeddings_provider: "openai" # optional override for /llm/embeddings
+llm_service_base_url: "http://127.0.0.1:8001" # LLM service base URL
+llm_service_provider: "openai" # provider alias expected by /llm/complete
+llm_service_embeddings_provider: "openai" # optional override for /llm/embeddings
 
 rerank_model: "BAAI/bge-reranker-v2-gemma" # You can enter your HF repository ID
 rerank_topk: 5
@@ -160,7 +160,7 @@ bearer_token: "<your_token>" # Or provided via the environment variable BEARER_T
 
 #### PostgreSQL and Alembic
 
-The app uses PostgreSQL for feedback, frequent QA, and qa_table. Set `database_url` in config (e.g. `postgresql://user:pass@localhost:5432/fin_rag`). From the project root:
+The app uses PostgreSQL for feedback, frequent QA, and qa_table. Configure `POSTGRES_*` in `.env` (or `DATABASE_URL` as a single override). The API SQLAlchemy pool size follows `POSTGRES_MAX_CONNECTIONS` (default `12`, no overflow connections). From the project root:
 
 - **Apply all migrations (create/update tables):**
   ```bash
@@ -172,25 +172,25 @@ The app uses PostgreSQL for feedback, frequent QA, and qa_table. Set `database_u
   alembic upgrade head
   ```
 
-Alembic reads the database URL from `config/production.yaml` (or `CONFIG_PATH`) or the `DATABASE_URL` environment variable.
+Alembic uses the same resolution as runtime: `.env` `POSTGRES_*` fields (or optional `DATABASE_URL`).
 
-#### LLM Gateway (doc_processing)
+#### LLM Gateway
 
 This service does not call LLM providers directly from `src/`.
 
-- All runtime LLM requests are routed through `doc_processing` `POST /llm/complete`.
-- All runtime embedding requests are routed through `doc_processing` `POST /llm/embeddings`.
-- Configure these keys in `config/llm.yaml` or `config/production.yaml`:
-  - `doc_processing_base_url`
-  - `doc_processing_provider`
-  - `doc_processing_embeddings_provider` (optional)
+- All runtime LLM requests are routed through the LLM service `POST /llm/complete`.
+- All runtime embedding requests are routed through the LLM service `POST /llm/embeddings`.
+- Configure these keys in `.env`:
+  - `llm_service_base_url`
+  - `llm_service_provider`
+  - `llm_service_embeddings_provider` (optional)
   - `llm_model_name`
   - `embeddings_model_name`
 - Optional provider overrides:
   - `feedback_classifier_provider` (for feedback classification jobs)
   - `treerag_llm_provider` (for TreeRAG planner/answer calls)
 
-You can inspect the contract in `openapi/doc_processing_openapi.json`.
+You can inspect the contract in `openapi/llm_service_openapi.json`.
 
 #### Chroma (client-server)
 
@@ -267,14 +267,15 @@ You can inspect the contract in `openapi/doc_processing_openapi.json`.
 1. `src/server.log`
 2. Backup directory (will attempt to copy upon receiving an exit signal or when the process terminates): `/root/autodl-tmp/server_logs`
 
-#### 2. doc_processing Service Logs
+#### 2. LLM Service Logs
 
-Please refer to the logs of your deployed `doc_processing` service that serves `/llm/complete`.
+Please refer to the logs of your deployed LLM service that serves `/llm/complete`.
 
 #### 3. User Feedback Log
 
 * `log/error`: User feedback issues and session log
-* Feedback and ratings are stored in PostgreSQL (see `database_url` and [PostgreSQL and Alembic](#postgresql-and-alembic)).
+* Feedback and ratings are stored in PostgreSQL (see `POSTGRES_*` / `DATABASE_URL` and [PostgreSQL and Alembic](#postgresql-and-alembic)).
+* Low-rating (`rating <= 2`) review payloads are appended locally to `logs/low_rating_feedback.jsonl` (one JSON object per line). No external low-rating webhook is called.
 
 ### Module Testing
 

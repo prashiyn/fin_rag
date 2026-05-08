@@ -32,7 +32,7 @@ Ingestion into Chroma and BM25 happens in **script/load_data.py**, not in the Fa
 
 ### 2.1 Entrypoint (script/load_data.py)
 
-- Loads **config** (e.g. `../config/production.yaml`).
+- Loads configuration from `.env` via `src/config.py`.
 - Instantiates **RAGManager(config)** (from src).
 - For each **collection directory** in a hardcoded list:
   - **create_collection(collection_name)** on RAGManager (creates empty Chroma collections).

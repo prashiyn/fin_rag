@@ -23,8 +23,8 @@ class QAChromaLoader:
         self.embeddings_model_name = embeddings_model_name or os.environ.get("EMBEDDINGS_MODEL_NAME", "BAAI/bge-m3")
         self.persist_directory = persist_directory or "./chroma_db"
         cfg = config or {
-            "doc_processing_base_url": os.environ.get("DOC_PROCESSING_BASE_URL"),
-            "doc_processing_provider": os.environ.get("DOC_PROCESSING_PROVIDER", "openai"),
+            "llm_service_base_url": os.environ.get("LLM_SERVICE_BASE_URL"),
+            "llm_service_provider": os.environ.get("LLM_SERVICE_PROVIDER", "openai"),
             "embeddings_model_name": self.embeddings_model_name,
         }
         self.embedding_function = DocProcessingEmbeddings.from_config(cfg)

@@ -1,7 +1,6 @@
 import sys
 import os
 import time
-import yaml
 import logging
 import json
 logging.basicConfig(
@@ -14,6 +13,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from src.utils.vllmChatService import ChatService
 from src.utils.ragManager import RAGManager
+from src.config import get_config
 
 def read_questions_from_md(md_file_path):
     questions = []
@@ -42,9 +42,7 @@ def load_from_json(file_path):
 
 if __name__ == "__main__":
     
-    config_path = os.getenv('CONFIG_PATH', '../../config/config_vllm.yaml')
-    with open(config_path, 'r') as file:
-        config = yaml.safe_load(file)
+    config = get_config()
     
     collections = {'lotus': 10, 'lotus_car_stats': 0, 'lotus_brand_info': 0}
     rag_manager = RAGManager(config=config, collections=collections)

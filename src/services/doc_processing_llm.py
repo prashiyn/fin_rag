@@ -93,7 +93,7 @@ class _AsyncCompatCompletions:
         **kwargs: Any,
     ) -> CompletionResponseCompat:
         if stream:
-            raise ValueError("async streaming is not supported by doc_processing llm/complete")
+            raise ValueError("async streaming is not supported by llm-service /llm/complete")
         if response_format is None and extra_body and extra_body.get("guided_json"):
             response_format = {
                 "type": "json_schema",
@@ -128,7 +128,7 @@ class AsyncOpenAICompatClient:
 
 class DocProcessingLLMClient:
     """
-    Shared client for doc_processing `/llm/complete`.
+    Shared client for llm-service `/llm/complete`.
     All runtime LLM calls in src/ should route through this class.
     """
 
@@ -146,13 +146,13 @@ class DocProcessingLLMClient:
         self.endpoint_path = endpoint_path
 
     @classmethod
-    def from_config(cls, config: dict, provider_key: str = "doc_processing_provider") -> "DocProcessingLLMClient":
-        base_url = config.get("doc_processing_base_url")
-        provider = config.get(provider_key) or config.get("doc_processing_provider") or "openai"
-        timeout = int(config.get("doc_processing_timeout_seconds", 120))
-        endpoint = config.get("doc_processing_llm_endpoint_path", "/llm/complete")
+    def from_config(cls, config: dict, provider_key: str = "llm_service_provider") -> "DocProcessingLLMClient":
+        base_url = config.get("llm_service_base_url")
+        provider = config.get(provider_key) or config.get("llm_service_provider") or "openai"
+        timeout = int(config.get("llm_service_timeout_seconds", 120))
+        endpoint = config.get("llm_service_llm_endpoint_path", "/llm/complete")
         if not base_url:
-            raise ValueError("doc_processing_base_url is required")
+            raise ValueError("llm_service_base_url is required")
         return cls(base_url=base_url, provider=provider, timeout_seconds=timeout, endpoint_path=endpoint)
 
     def complete(
@@ -278,8 +278,8 @@ class DocProcessingEmbeddings:
         return cls(
             client=client,
             model=config.get("embeddings_model_name"),
-            provider=config.get("doc_processing_embeddings_provider") or config.get("doc_processing_provider"),
-            batch_size=int(config.get("doc_processing_embeddings_batch_size", 64)),
+            provider=config.get("llm_service_embeddings_provider") or config.get("llm_service_provider"),
+            batch_size=int(config.get("llm_service_embeddings_batch_size", 64)),
         )
 
     def _normalize_embedding(self, emb: Any) -> list[float]:

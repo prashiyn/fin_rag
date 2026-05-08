@@ -51,7 +51,7 @@ def save_last_processed_id(file_path: str | Path, last_id: int) -> None:
 
 def _get_classifier_client(config: dict) -> DocProcessingLLMClient | None:
     """Build centralized llm client for classifier model."""
-    if not config.get("doc_processing_base_url"):
+    if not config.get("llm_service_base_url"):
         return None
     try:
         return DocProcessingLLMClient.from_config(config, provider_key="feedback_classifier_provider")

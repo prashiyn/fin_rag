@@ -42,10 +42,8 @@ class FaissRetriever:
 
 if __name__ == "__main__":
     import os
-    import yaml
-    config_path = os.getenv("CONFIG_PATH", "../../config/config_vllm.yaml")
-    with open(config_path, "r") as file:
-        config = yaml.safe_load(file)
+    from config import get_config
+    config = get_config()
 
     embeddings = DocProcessingEmbeddings.from_config(config)
 

@@ -1,6 +1,5 @@
 import psutil
 import logging
-import yaml
 import chromadb
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -8,11 +7,18 @@ from langchain_community.chat_models import ChatOllama
 import uuid
 import time
 import concurrent.futures  # added
+import sys
+from pathlib import Path
+
+_project_root = Path(__file__).resolve().parent.parent
+_src = _project_root / "src"
+if str(_src) not in sys.path:
+    sys.path.insert(0, str(_src))
+from config import get_config
 
 
 def load_config(config_path):
-    with open(config_path, "r") as file:
-        return yaml.safe_load(file)
+    return get_config()
 
 
 class RAGToTNode:
@@ -281,8 +287,7 @@ class RAGToT:
                 return result
         return None
 def main():
-    config_path = "../config/config.yaml"
-    config = load_config(config_path)
+    config = load_config("")
     rag_tot = RAGToT(config, 'lotus',max_workers=7)
     rag_tot.load_model("gemma2:9b")
     result = rag_tot.run("What are some of Lotus's most memorable achievements in F1 history? Could you share some specific stories or data?", max_depth=2)

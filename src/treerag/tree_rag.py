@@ -87,7 +87,7 @@ class TreeRagEngine:
     """
     Tree-of-thought style RAG orchestrator.
     - Uses existing retrieval stack via RAGManager.get_retriever(collection_name)
-    - Uses centralized doc_processing llm/complete calls configured via config/*
+    - Uses centralized LLM service llm/complete calls configured via config/*
     """
 
     def __init__(

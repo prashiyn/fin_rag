@@ -3,7 +3,6 @@
 import sys
 import os
 import time
-import yaml
 import logging
 import json
 from pathlib import Path
@@ -12,13 +11,13 @@ import shutil
 import uuid
 import requests
 import re
-from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from utils.vllmChatService import ChatService
 from utils.ragManager import RAGManager
 from services.doc_processing_llm import DocProcessingLLMClient
+from config import get_config
 
 # -------------csv_path-----------------
 csv_path = "/root/autodl-tmp/dir_tzh/lotus_dataset/filled.csv"
@@ -46,28 +45,7 @@ if csv_path != output_csv:
 
 
 def _load_config() -> dict:
-    root = Path(__file__).resolve().parents[2]
-    load_dotenv(root / ".env")
-    config_path = os.getenv("CONFIG_PATH", str(root / "config" / "production.yaml"))
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f) or {}
-    llm_path = Path(config_path).parent / "llm.yaml"
-    if llm_path.exists():
-        with open(llm_path, "r", encoding="utf-8") as f:
-            llm = yaml.safe_load(f) or {}
-        for k, v in llm.items():
-            config.setdefault(k, v)
-    test_llm_path = Path(config_path).parent / "test_llm.yaml"
-    if test_llm_path.exists():
-        with open(test_llm_path, "r", encoding="utf-8") as f:
-            test_llm = yaml.safe_load(f) or {}
-        for k, v in test_llm.items():
-            config.setdefault(k, v)
-    if config.get("test_llm_api_key") is None:
-        env_val = os.getenv("TEST_LLM_API_KEY")
-        if env_val:
-            config["test_llm_api_key"] = env_val
-    return config
+    return get_config()
 
 
 _cfg = _load_config()
@@ -125,9 +103,7 @@ def generate_question(period_code,topic, max_retry=2):
         
 
 
-config_path = os.getenv('CONFIG_PATH', '../../config/R1.yaml')
-with open(config_path, 'r') as file:
-    config = yaml.safe_load(file)
+config = get_config()
 
 import torch
 torch.cuda.empty_cache()

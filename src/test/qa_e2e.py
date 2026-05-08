@@ -1,7 +1,6 @@
 import sys
 import os
 import time
-import yaml
 import logging
 import json
 import ipdb
@@ -15,6 +14,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from utils.vllmChatService import ChatService
 from utils.ragManager import RAGManager
+from config import get_config
 
 def read_questions_from_md(md_file_path):
     questions = []
@@ -55,9 +55,7 @@ def load_questions_file(file_path):
 if __name__ == "__main__":
 
     ipdb.set_trace()
-    config_path = os.getenv('CONFIG_PATH', '../../config/production.yaml')
-    with open(config_path, 'r') as file:
-        config = yaml.safe_load(file)
+    config = get_config()
     
     import torch
     torch.cuda.empty_cache()

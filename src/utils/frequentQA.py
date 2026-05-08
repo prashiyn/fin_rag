@@ -196,12 +196,8 @@ class QuestionSimilarityFinder:
 
 
 if __name__ == "__main__":
-    import os
-    import yaml
-    from pathlib import Path
-    config_path = os.environ.get("CONFIG_PATH") or str(Path(__file__).resolve().parent.parent.parent / "config" / "production.yaml")
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
+    from config import get_config
+    config = get_config()
     finder = QuestionSimilarityFinder(database_url=config.get("database_url"))
     # Example usage
     results = finder.find_similar_questions_db("What is the gross margin of Lotus Technology?", top_n=3)

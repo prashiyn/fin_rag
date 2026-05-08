@@ -1,13 +1,12 @@
 import os
-import yaml
 import numpy as np
-from pathlib import Path
-from dotenv import load_dotenv
 
 try:
     from src.services.doc_processing_llm import DocProcessingEmbeddings
+    from src.config import get_config
 except ImportError:
     from services.doc_processing_llm import DocProcessingEmbeddings
+    from config import get_config
 
 # This model supports two prompts: "s2p_query" and "s2s_query" for sentence-to-passage and sentence-to-sentence tasks, respectively.
 # They are defined in `config_sentence_transformers.json`
@@ -22,18 +21,7 @@ docs = [
     "Green tea has been consumed for centuries and is known for its potential health benefits. It contains antioxidants that may help protect the body against damage caused by free radicals. Regular consumption of green tea has been associated with improved heart health, enhanced cognitive function, and a reduced risk of certain types of cancer. The polyphenols in green tea may also have anti-inflammatory and weight loss properties.",
 ]
 
-root = Path(__file__).resolve().parents[2]
-load_dotenv(root / ".env")
-config_path = os.getenv("CONFIG_PATH", str(root / "config" / "production.yaml"))
-with open(config_path, "r", encoding="utf-8") as f:
-    cfg = yaml.safe_load(f) or {}
-llm_path = Path(config_path).parent / "llm.yaml"
-if llm_path.exists():
-    with open(llm_path, "r", encoding="utf-8") as f:
-        llm_cfg = yaml.safe_load(f) or {}
-    for k, v in llm_cfg.items():
-        cfg.setdefault(k, v)
-
+cfg = get_config()
 emb = DocProcessingEmbeddings.from_config(cfg)
 query_embeddings = np.array(emb.embed_documents(queries), dtype=np.float32)
 doc_embeddings = np.array(emb.embed_documents(docs), dtype=np.float32)

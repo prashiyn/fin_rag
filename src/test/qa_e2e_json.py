@@ -1,7 +1,6 @@
 import sys
 import os
 import time
-import yaml
 import logging
 import json
 from datetime import datetime
@@ -16,6 +15,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 from utils.vllmChatService import ChatService
 from utils.ragManager import RAGManager
 from gpu_log import log_gpu_usage
+from config import get_config
 
 
 log_dir = os.path.join(script_dir, 'logs')
@@ -36,11 +36,7 @@ if __name__ == "__main__":
     logger = logging.getLogger(__name__)
     
     
-    default_config_path = os.path.join(script_dir, '../../config/development.yaml')
-    config_path = os.getenv('CONFIG_PATH', default_config_path)
-    
-    with open(config_path, 'r') as file:
-        config = yaml.safe_load(file)
+    config = get_config()
 
     print("Reranker model: ", config['rerank_model'])
 

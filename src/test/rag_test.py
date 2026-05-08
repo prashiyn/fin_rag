@@ -1,6 +1,5 @@
 import os
 import sys
-import yaml
 import json
 from tqdm import tqdm
 
@@ -8,11 +7,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.chromaManager import ChromaManager
 from utils.ollamaManager import OllamaManager
+from config import get_config
 
 
 def load_config(config_path):
-    with open(config_path, 'r') as file:
-        return yaml.safe_load(file)
+    return get_config()
 
 
 def test_retrieval_acc(config, collection_name, test_directory='../Data/test_data', k=10):
@@ -86,8 +85,7 @@ def ask_question_and_print_source(config, collection_name, question, k=10):
         #print(f"- {source}")
 
 if __name__ == '__main__':
-    config_path = "../config/config.yaml"
-    config = load_config(config_path)
+    config = load_config("")
     
     question = "Are there any new releases in 2023?"
     ask_question_and_print_source(config, 'lotus_car_stats', question)

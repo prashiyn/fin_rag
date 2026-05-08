@@ -146,4 +146,3 @@ dmypy.json
 # Additional
 #Data
 config/*
-!config/example.yaml

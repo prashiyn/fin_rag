@@ -5,15 +5,15 @@ import random
 from collections import deque
 from datetime import datetime
 import json
-import yaml
 import sys
 import os
 from FlagEmbedding import FlagLLMReranker
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from utils.ragManager import RAGManager
-from utils.vllmChatService import ChatService
+from src.utils.ragManager import RAGManager
+from src.utils.vllmChatService import ChatService
+from src.config import get_config
 
 question_file = "/root/autodl-tmp/cjj/RAG_Agent/src/test/test_questions/question_batch1.md"
 with open(question_file, 'r', encoding='utf-8') as f:
@@ -173,9 +173,7 @@ def model_worker(config):
 stats_thread = threading.Thread(target=print_stats, daemon=True)
 stats_thread.start()
 
-config_path = os.getenv('CONFIG_PATH', '../../config/production.yaml')
-with open(config_path, 'r') as file:
-    rag_config = yaml.safe_load(file)
+rag_config = get_config()
 
 collections = {'lotus': 10}
 rag_manager = RAGManager(config=rag_config, collections=collections)

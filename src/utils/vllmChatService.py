@@ -77,7 +77,7 @@ class ChatService:
         self.api_chat_manager: Dict[str, ChatManager] = {}
         self.config = config
         self.rag_manager: RAGManager = rag_manager
-        # Model selection still lives here; actual LLM transport is centralized in doc_processing_llm.
+        # Model selection still lives here; actual LLM transport is centralized in the LLM service client.
         self.model_name: str = config.get("chat_llm_model_name") or config.get("llm_model_name")
         self.rerank_topk = rerank_topk
         self.session_timeout = session_timeout
@@ -106,8 +106,8 @@ class ChatService:
         if not self.model_name:
             logging.error("LLM model name is not configured.")
             sys.exit(1)
-        if not self.config.get("doc_processing_base_url"):
-            logging.error("doc_processing_base_url is not configured.")
+        if not self.config.get("llm_service_base_url"):
+            logging.error("llm_service_base_url is not configured.")
             sys.exit(1)
         logging.info(f"Using model: {self.model_name}")
 

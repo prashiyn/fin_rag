@@ -285,10 +285,8 @@ class EnsembleRetriever:
 
 if __name__ == "__main__":
     import os
-    import yaml
-    config_path = os.getenv('CONFIG_PATH', '../config/production.yaml')
-    with open(config_path, 'r') as file:
-        config = yaml.safe_load(file)
+    from config import get_config
+    config = get_config()
 
     collection_name = "lotus"
     embeddings = DocProcessingEmbeddings.from_config(config)

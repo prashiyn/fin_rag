@@ -17,13 +17,6 @@ from pathlib import Path
 from threading import Timer
 from typing import Any, Optional
 
-from dotenv import load_dotenv
-
-# Load .env from project root so CONFIG_PATH, DATABASE_URL, PORT, BEARER_TOKEN, etc. are set
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-
-import requests
-import yaml
 from fastapi import FastAPI, Request, Depends, Body, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -38,6 +31,7 @@ from utils.ragManager import RAGManager
 from utils.vllmChatService import ChatService
 from treerag.tree_rag_service import TreeRagService
 from services.feedback_processor import process_feedback_records
+from config import get_config
 
 # ---------------------------------------------------------------------------
 # Config and DB (used in lifespan and routes)
@@ -46,6 +40,7 @@ from services.feedback_processor import process_feedback_records
 PROJECT_ROOT = Path(__file__).resolve().parent
 LOG_PATH = PROJECT_ROOT / "server.log"
 BACKUP_DIR = Path("/root/autodl-tmp/server_logs")
+LOW_RATING_LOG_PATH = PROJECT_ROOT.parent / "logs" / "low_rating_feedback.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -107,48 +102,6 @@ class ApiEnvelope(BaseModel):
     status: str = Field(..., description="'success' or 'error'")
     message: str = Field(..., description="Human-readable message")
     data: Optional[Any] = Field(None, description="Payload when status is success")
-
-
-def load_config(config_path: str) -> dict:
-    with open(config_path, encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    if config is None:
-        config = {}
-    # Merge LLM/model defaults from config/llm.yaml so all model keys are defined in one place
-    config_dir = Path(config_path).parent
-    llm_path = config_dir / "llm.yaml"
-    if llm_path.exists():
-        with open(llm_path, encoding="utf-8") as f:
-            llm = yaml.safe_load(f)
-        if llm:
-            for k, v in llm.items():
-                config.setdefault(k, v)
-
-    # Runtime override keys from environment (.env is loaded at module import).
-    # Example: doc_processing_base_url <- env DOC_PROCESSING_BASE_URL.
-    env_override_keys = [
-        "doc_processing_base_url",
-        "doc_processing_provider",
-        "doc_processing_embeddings_provider",
-        "feedback_classifier_provider",
-        "treerag_llm_provider",
-        "test_llm_api_key",
-    ]
-    for key in env_override_keys:
-        val = config.get(key)
-        if val is None or (isinstance(val, str) and not val.strip()):
-            env_name = key.upper()
-            env_val = os.getenv(env_name)
-            if env_val is not None and env_val != "":
-                config[key] = env_val
-    return config
-
-
-def get_config_path() -> Path:
-    raw = os.getenv("CONFIG_PATH")
-    if raw:
-        return Path(raw)
-    return PROJECT_ROOT.parent / "config" / "production.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -216,28 +169,8 @@ async def check_token_optional(
 
 
 # ---------------------------------------------------------------------------
-# Helpers used by routes (low-rating webhook and SSE parsing)
+# Helpers used by routes (low-rating handling)
 # ---------------------------------------------------------------------------
-
-def extract_reply_contents(sse_text: str) -> str:
-    """Extract payload.content from event:reply in SSE text. Returns last reply."""
-    contents = []
-    current_event = None
-    data_buffer = []
-    for line in sse_text.splitlines():
-        if line.startswith("event:"):
-            if current_event == "reply" and data_buffer:
-                data_json = json.loads("".join(data_buffer))
-                contents.append(data_json["payload"]["content"])
-            current_event = line[6:].strip()
-            data_buffer = []
-        elif line.startswith("data:"):
-            data_buffer.append(line[5:].strip())
-    if current_event == "reply" and data_buffer:
-        data_json = json.loads("".join(data_buffer))
-        contents.append(data_json["payload"]["content"])
-    return contents[-1] if contents else ""
-
 
 def handle_low_rating(
     config: dict,
@@ -246,40 +179,17 @@ def handle_low_rating(
     question: str,
     response: str,
 ) -> str | None:
-    appkey = config.get("r1_online_appkey")
-    url = config.get("r1_online_url")
-    if not appkey or not url:
-        return None
-    content = (
-        f'User Issues：{question}\nCurrent Answer： {response}\n'
-        "User is not satisfied with the current answer, please search the internet and judge"
-        if not feedback
-        else (
-            f'User Issues：{question}\nCurrent Answer： {response}\n'
-            f"User is not satisfied with the current answer, this is the user's feedback on the answer: {feedback}\n"
-            "Please search the internet and judge"
-        )
-    )
-    payload = {
+    LOW_RATING_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
         "session_id": session_id,
-        "bot_app_key": appkey,
-        "visitor_biz_id": session_id,
-        "content": content,
-        "incremental": True,
-        "streaming_throttle": 10,
-        "visitor_labels": [],
-        "custom_variables": {},
-        "search_network": "enable",
+        "question": question,
+        "response": response,
+        "feedback": feedback,
     }
-    resp = requests.post(
-        url,
-        headers={"Content-Type": "application/json"},
-        json=payload,
-        stream=False,
-        timeout=None,
-    )
-    resp.encoding = "utf-8"
-    return extract_reply_contents(resp.text)
+    with open(LOW_RATING_LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return "logged_for_review"
 
 
 # ---------------------------------------------------------------------------
@@ -290,8 +200,7 @@ def handle_low_rating(
 async def lifespan(app: FastAPI):
     os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
 
-    config_path = get_config_path()
-    config = load_config(str(config_path))
+    config = get_config()
 
     bearer_token = config.get("bearer_token") or os.getenv("BEARER_TOKEN")
     if not bearer_token:
@@ -371,10 +280,13 @@ async def lifespan(app: FastAPI):
     app.state.cleanup_timer = cleanup_timer
     logger.info("Initial session cleanup scheduled in 5 minutes")
 
-    database_url = os.getenv("DATABASE_URL") or config.get("database_url")
+    database_url = config.get("database_url") or ""
     if not database_url:
-        raise ValueError("database_url not configured (set DATABASE_URL or database_url in config)")
-    init_db(database_url)
+        raise ValueError(
+            "database_url not configured (set POSTGRES_* in .env, or DATABASE_URL)"
+        )
+    pool_n = max(1, int(config.get("postgres_max_connections", 12)))
+    init_db(database_url, pool_size=pool_n, max_overflow=0)
 
     # Optional: periodic feedback processing (classify + alias records)
     feedback_stop = threading.Event()
